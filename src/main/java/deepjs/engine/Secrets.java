@@ -43,6 +43,7 @@ final class Secrets {
         final int line;
         final String note;
         final boolean isPublic;             // public by design, not a leak
+        String[] excerpt = Lexer.NO_EXCERPT;    // the code around the value: as raw as `value`
 
         Secret(String kind, String severity, double confidence, String value, String key, String file, int line,
                String note, boolean isPublic) {
@@ -457,7 +458,7 @@ final class Secrets {
                         continue;
                     }
                 }
-                add(out, seen, new Secret(kind, severity, hit.isPublic() ? 0.9 : 0.95, hit.value(), key, file, p.line(i), note, hit.isPublic()));
+                add(out, seen, p, i, new Secret(kind, severity, hit.isPublic() ? 0.9 : 0.95, hit.value(), key, file, p.line(i), note, hit.isPublic()));
             }
             if (!typed.isEmpty()) {
                 continue;
@@ -487,7 +488,7 @@ final class Secrets {
             double score = verdict.score();
             if (label.equals("benign") && strength == 2 && Py.found(PASSWORD_KEY, normaliseKey(key)) && passphraseLike(value)) {
                 // testingPassword = "IamUsedForTesting": words, but written like a password, under a password's name
-                add(out, seen, new Secret("HARDCODED_PASSWORD", "medium", 0.5, value, key, file, p.line(i),
+                add(out, seen, p, i, new Secret("HARDCODED_PASSWORD", "medium", 0.5, value, key, file, p.line(i),
                         "Passphrase-like value assigned to '" + shownKey + "' — often a default or test account's password.", false));
                 continue;
             }
@@ -496,7 +497,7 @@ final class Secrets {
             }
             if (Py.matches(HEX32, value) && nearAlgolia(p, i)) {
                 // {appId, apiKey, indexName}: what every site with Algolia search ships to the browser
-                add(out, seen, new Secret("ALGOLIA_SEARCH_KEY", "info", 0.8, value, key, file, p.line(i),
+                add(out, seen, p, i, new Secret("ALGOLIA_SEARCH_KEY", "info", 0.8, value, key, file, p.line(i),
                         "Algolia key next to appId / indexName — a search-only key is public by design. An admin key "
                                 + "has the same shape: check its ACL in the Algolia dashboard.", true));
                 continue;
@@ -506,22 +507,22 @@ final class Secrets {
                     continue;
                 }
                 if (visitor) {
-                    add(out, seen, pageToken(value, key, file, p.line(i)));
+                    add(out, seen, p, i, pageToken(value, key, file, p.line(i)));
                     continue;
                 }
                 double confidence = 0.45 + 0.4 * score;
-                add(out, seen, new Secret("HARDCODED_SECRET", confidence >= 0.72 ? "high" : "medium", Math.min(confidence, 0.92),
+                add(out, seen, p, i, new Secret("HARDCODED_SECRET", confidence >= 0.72 ? "high" : "medium", Math.min(confidence, 0.92),
                         value, key, file, p.line(i), "Literal value assigned to '" + shownKey + "'.", false));
             } else if (strength == 1) {
                 if (label.equals("secret") && visitor) {
-                    add(out, seen, pageToken(value, key, file, p.line(i)));
+                    add(out, seen, p, i, pageToken(value, key, file, p.line(i)));
                 } else if (label.equals("secret")) {
-                    add(out, seen, new Secret("HARDCODED_SECRET", "medium", 0.4 + 0.4 * score, value, key, file, p.line(i),
+                    add(out, seen, p, i, new Secret("HARDCODED_SECRET", "medium", 0.4 + 0.4 * score, value, key, file, p.line(i),
                             "Random-looking value assigned to '" + shownKey + "'.", false));
                 }
             } else if (entropy && label.equals("secret") && value.length() >= 32 && value.length() <= 128 && strength == 0
                     && !Py.matches(HEX, value) && !isDigits(key)) {
-                add(out, seen, new Secret("HIGH_ENTROPY_STRING", "low", 0.3 + 0.3 * score, value, key, file, p.line(i),
+                add(out, seen, p, i, new Secret("HIGH_ENTROPY_STRING", "low", 0.3 + 0.3 * score, value, key, file, p.line(i),
                         "Unlabelled random-looking string (enabled by --entropy; expect noise).", false));
             }
         }
@@ -535,22 +536,36 @@ final class Secrets {
             int line = p.lex.lineOf(p.lex.commentAt.get(c));
             // line by line, each bounded: a licence banner of megabytes costs what its lines cost
             List<String> rows = Py.split(comment, "\n");
+            int following = p.lex.commentAt.get(c);
             for (int r = 0; r < rows.size(); r++) {
                 String row = rows.get(r);
+                int rowAt = following;
+                following += row.length() + 1;
                 if (row.length() < 12) {
                     continue;
                 }
                 for (Hit hit : typedMatches(truncated(row, MAX_SCANNED))) {
-                    add(out, seen, new Secret(hit.kind(), hit.severity(), 0.85, hit.value(), "(comment)", file, line + r,
-                            hit.note(), hit.isPublic()));
+                    add(out, seen, p, new Secret(hit.kind(), hit.severity(), 0.85, hit.value(), "(comment)", file, line + r,
+                            hit.note(), hit.isPublic()), rowAt, rowAt + Math.min(row.length(), MAX_SCANNED));
                 }
             }
         }
         return out;
     }
 
-    private static void add(List<Secret> out, Set<String> seen, Secret s) {
+    /** Record a secret read from token `i`. */
+    private static void add(List<Secret> out, Set<String> seen, Program p, int i, Secret s) {
+        add(out, seen, p, s, p.lex.start[i], p.lex.end[i]);
+    }
+
+    /** Record a secret read from the source between `from` and `to`. */
+    private static void add(List<Secret> out, Set<String> seen, Program p, Secret s, int from, int to) {
         if (seen.add(s.kind + "\u0000" + s.value)) {
+            String src = p.lex.src;
+            from = Math.max(0, Math.min(from, src.length()));
+            to = Math.max(from, Math.min(to, src.length()));
+            int at = src.substring(from, to).indexOf(s.value);      // the value itself, where it is written out
+            s.excerpt = at >= 0 ? p.lex.excerpt(from + at, from + at + s.value.length()) : p.lex.excerpt(from, to);
             out.add(s);
         }
     }

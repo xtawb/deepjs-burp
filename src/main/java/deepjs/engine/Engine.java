@@ -10,6 +10,7 @@ import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -293,6 +294,7 @@ public final class Engine {
         if (ep.file.startsWith("map:") && !old.file.startsWith("map:")) {
             old.file = ep.file;                             // the original source is the better pointer
             old.line = ep.line;
+            old.excerpt = ep.excerpt;
         }
     }
 
@@ -359,7 +361,11 @@ public final class Engine {
 
     // ── output ───────────────────────────────────────────────────────────────
 
-    /** Everything that is new, or has changed, since the previous call. `reveal`: secret values unmasked. */
+    /**
+     * Everything that is new, or has changed, since the previous call. `reveal`: secret values
+     * unmasked, and every endpoint and secret followed by its code (before, span, after) —
+     * which is otherwise left empty, because the code around a finding can hold what masking hides.
+     */
     public List<String[]> flush(boolean reveal) {
         List<String[]> out = new ArrayList<>();
         resolveBases();
@@ -377,15 +383,15 @@ public final class Engine {
             String params = String.join(",", ep.params), body = String.join(",", ep.body), headers = String.join(",", ep.headers);
             String signature = ep.kind + "|" + params + "|" + body + "|" + headers;
             if (!signature.equals(sentEndpoints.put(entry.getKey(), signature))) {
-                out.add(new String[]{"E", ep.method, fullUrl(ep), ep.url, ep.kind, params, body, headers, ep.file,
-                        Integer.toString(ep.line), new BigDecimal(ep.confidence).setScale(2, RoundingMode.HALF_EVEN).toPlainString()});
+                out.add(withCode(ep.excerpt, reveal, "E", ep.method, fullUrl(ep), ep.url, ep.kind, params, body, headers, ep.file,
+                        Integer.toString(ep.line), new BigDecimal(ep.confidence).setScale(2, RoundingMode.HALF_EVEN).toPlainString()));
             }
         }
         for (Map.Entry<String, Secret> entry : secrets.entrySet()) {
             if (sentSecrets.add(entry.getKey())) {
                 Secret s = entry.getValue();
-                out.add(new String[]{"S", s.severity, s.kind, reveal ? s.value : s.masked(), s.key, s.file,
-                        Integer.toString(s.line), s.note, s.fingerprint(), s.isPublic ? "1" : "0"});
+                out.add(withCode(s.excerpt, reveal, "S", s.severity, s.kind, reveal ? s.value : s.masked(), s.key, s.file,
+                        Integer.toString(s.line), s.note, s.fingerprint(), s.isPublic ? "1" : "0"));
             }
         }
         for (String url : unvisited) {
@@ -412,6 +418,14 @@ public final class Engine {
             once(out, "P", name, name);
         }
         return out;
+    }
+
+    private static String[] withCode(String[] excerpt, boolean reveal, String... fields) {
+        String[] record = Arrays.copyOf(fields, fields.length + 3);
+        for (int i = 0; i < 3; i++) {
+            record[fields.length + i] = reveal ? excerpt[i] : "";
+        }
+        return record;
     }
 
     private void once(List<String[]> out, String tag, String identity, String... fields) {

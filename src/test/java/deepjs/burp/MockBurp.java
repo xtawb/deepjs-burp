@@ -2,8 +2,12 @@ package deepjs.burp;
 
 import burp.api.montoya.MontoyaApi;
 import burp.api.montoya.core.ByteArray;
+import burp.api.montoya.core.ToolSource;
+import burp.api.montoya.core.ToolType;
 import burp.api.montoya.extension.ExtensionUnloadingHandler;
+import burp.api.montoya.http.handler.HttpRequestToBeSent;
 import burp.api.montoya.http.handler.HttpResponseReceived;
+import burp.api.montoya.http.message.HttpHeader;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.MimeType;
 import burp.api.montoya.http.message.requests.HttpRequest;
@@ -17,6 +21,7 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -43,6 +48,8 @@ final class MockBurp {
     final List<String> output = Collections.synchronizedList(new ArrayList<>());
     final List<Object> siteMapAdds = Collections.synchronizedList(new ArrayList<>());
     final List<HttpRequestResponse> history = new ArrayList<>();
+    final Map<String, String> savedStrings = Collections.synchronizedMap(new HashMap<>());     // preferences the extension wrote
+    final Map<String, Boolean> savedBooleans = Collections.synchronizedMap(new HashMap<>());
     volatile Component suiteTab;
     volatile ExtensionUnloadingHandler unloadHandler;
     volatile boolean bapp;                  // "this copy was installed from the BApp Store"
@@ -135,6 +142,19 @@ final class MockBurp {
         ));
     }
 
+    /** A request on its way out, as Burp hands it to an HttpHandler. `headers`: name, value, name, value… */
+    HttpRequestToBeSent sent(String method, String url, boolean throughProxy, String... headers) {
+        List<HttpHeader> list = new ArrayList<>();
+        for (int i = 0; i + 1 < headers.length; i += 2) {
+            String name = headers[i], value = headers[i + 1];
+            list.add(mock(HttpHeader.class, Map.of("name", a -> name, "value", a -> value)));
+        }
+        ToolSource source = mock(ToolSource.class, Map.of(
+                "isFromTool", a -> throughProxy && Arrays.asList((ToolType[]) a[0]).contains(ToolType.PROXY)));
+        return mock(HttpRequestToBeSent.class, Map.of(
+                "url", a -> url, "method", a -> method, "headers", a -> list, "toolSource", a -> source));
+    }
+
     /** A response as Burp hands it to an HttpHandler (e.g. something the browser loaded through the proxy). */
     HttpResponseReceived proxied(String url, String body, MimeType mime) {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
@@ -169,8 +189,10 @@ final class MockBurp {
                 }
         ));
         Object prefs = mock(burp.api.montoya.persistence.Preferences.class, Map.of(
-                "getString", a -> null,
-                "getBoolean", a -> null
+                "getString", a -> savedStrings.get((String) a[0]),
+                "setString", a -> savedStrings.put((String) a[0], (String) a[1]),
+                "getBoolean", a -> savedBooleans.get((String) a[0]),
+                "setBoolean", a -> savedBooleans.put((String) a[0], (Boolean) a[1])
         ));
         Object persistence = mock(burp.api.montoya.persistence.Persistence.class, Map.of("preferences", a -> prefs));
         Object ui = mock(burp.api.montoya.ui.UserInterface.class, Map.of(

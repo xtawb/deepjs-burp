@@ -6,6 +6,9 @@ The extension's analysis engine (src/main/java/deepjs/engine) is a Java port of
 the Python package at https://github.com/xtawb/deepjs. This script feeds
 identical input to both — over the same line protocol (`deepjs serve` /
 `deepjs.engine.Serve`) — and compares everything they report, record for record.
+Twice: as a client sees it by default (values masked, no source), and with
+--reveal, which is what the extension uses (raw values, and the code each
+finding was read from).
 
     python tools/parity.py --classpath build/libs/deepjs-burp.jar --engine ../deepjs
     python tools/parity.py --classpath build/libs/deepjs-burp.jar --engine ../deepjs DIR [DIR …]
@@ -230,29 +233,30 @@ def lines_for(ident: str, kind: str, url: str, body: bytes) -> str:
     return "\t".join(["A", ident, kind, esc(url), base64.b64encode(body).decode("ascii")]) + "\n"
 
 
-def python_engine(requests: Iterable[Request]) -> List[List[str]]:
+def python_engine(requests: Iterable[Request], reveal: bool) -> List[List[str]]:
     from deepjs.serve import Worker
 
     out = io.StringIO()
-    worker = Worker(out)
+    worker = Worker(out, reveal=reveal)
     answers: List[List[str]] = []
     for n, (kind, url, body) in enumerate(requests):
         out.seek(0)
         out.truncate()
         worker.handle(lines_for(str(n), kind, url, body))
-        answers.append(out.getvalue().splitlines())
+        answers.append(out.getvalue().split("\n")[:-1])     # not splitlines(): source may hold a form feed
     return answers
 
 
 class JavaEngine:
-    def __init__(self, classpath: str) -> None:
+    def __init__(self, classpath: str, reveal: bool) -> None:
         java = shutil.which("java")
         home = os.environ.get("JAVA_HOME")
         if home and os.path.isfile(os.path.join(home, "bin", "java" + (".exe" if os.name == "nt" else ""))):
             java = os.path.join(home, "bin", "java" + (".exe" if os.name == "nt" else ""))
         if not java:
             sys.exit("parity: `java` not found — put a JDK 17+ on PATH or set JAVA_HOME")
-        self.proc = subprocess.Popen([java, "-Xss16m", "-cp", classpath, "deepjs.engine.Serve"],
+        self.proc = subprocess.Popen([java, "-Xss16m", "-cp", classpath, "deepjs.engine.Serve"]
+                                     + (["--reveal"] if reveal else []),
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE)
         ready = self.proc.stdout.readline().decode("utf-8").rstrip("\n").split("\t")
         if ready[:2] != ["READY", "deepjs"]:
@@ -323,16 +327,20 @@ def main() -> int:
     for d in args.dirs:
         sets[os.path.basename(os.path.normpath(d))] = directory_input(d)
 
-    java = JavaEngine(args.classpath)
+    engines = {reveal: JavaEngine(args.classpath, reveal) for reveal in (False, True)}
     from deepjs import __version__
-    print(f"python engine: deepjs {__version__} ({ENGINE or 'installed package'})   java engine: deepjs-burp {java.version}")
+    print(f"python engine: deepjs {__version__} ({ENGINE or 'installed package'})   "
+          f"java engine: deepjs-burp {engines[True].version}")
     total = 0
     try:
         for name, requests in sets.items():
-            if requests:
-                total += compare(name, requests, python_engine(requests), java.run(requests), args.show)
+            for reveal, java in engines.items():
+                if requests:
+                    total += compare(name + (", revealed" if reveal else ""), requests,
+                                     python_engine(requests, reveal), java.run(requests), args.show)
     finally:
-        java.close()
+        for java in engines.values():
+            java.close()
     print("parity: " + ("the engines agree on every record" if not total else f"{total} difference(s)"))
     return 0 if not total else 1
 

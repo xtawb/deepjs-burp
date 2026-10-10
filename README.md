@@ -33,8 +33,8 @@ responses arrive.
 
 | | |
 |---|---|
-| **API calls** | Method, URL, query names, body fields, headers, where it was found. Filter, select rows, *Send to Repeater*: a request skeleton is built from the finding (`{id}` becomes `:id`, body fields become a JSON object). Paths that only appear as strings are listed too and can be hidden. |
-| **Secrets** | 35 credential formats, and credible values under secret-bearing names. Values are shown as found — you need them to check a finding — and *Mask values* hides the middle of each one for screenshots. Keys that are public by design (Stripe publishable keys, Firebase web configuration, Supabase anon keys, Algolia search keys) and tokens the server writes into a page for the current visitor are labelled as such, not reported as leaks; the rest are also raised as issues. |
+| **API calls** | Method, URL, query names, body fields, headers, where it was found — and **Requested**: whether Burp has already made that call. *Only not requested yet* leaves the calls the application's pages never led you to. Select a row and the code it was read from is shown under the table, the call highlighted. Narrow the list to one host, or by text; paths that merely appear as strings are listed with *Show string-only paths*. *Send to Repeater* builds a request from the finding (`{id}` becomes `:id`, body fields become a JSON object) and, with *Borrow the browser's session*, adds the Cookie, Authorization and CSRF / API-key headers your browser last sent to that host. |
+| **Secrets** | 35 credential formats, and credible values under secret-bearing names, each shown in its code when selected. Values are shown as found — you need them to check a finding — and *Mask values* hides the middle of each one, in the table and in the code, for screenshots. Keys that are public by design (Stripe publishable keys, Firebase web configuration, Supabase anon keys, Algolia search keys) and tokens the server writes into a page for the current visitor are labelled as such, not reported as leaks; the rest are also raised as issues. Right-click → *Not a secret* removes a value from the list and remembers it: the same value is not listed or raised again, in this project or another. |
 | **Hidden scripts** | Chunks and source maps the code names but no page has loaded. The chunk-name function of webpack, Next.js and Vite builds is evaluated, so the lazy parts of an application — the admin panel included — are listed without visiting them. |
 | **Hosts** | Every host the code mentions: in scope, cloud storage, internal, third party; non-production names flagged. |
 | **Routes · GraphQL · packages** | Client-side routes, GraphQL operation names, API base URLs, npm package names recovered from source maps. |
@@ -66,6 +66,23 @@ extension cannot replace the file Burp has loaded it from, and code that
 fetched and ran its own replacement would be code nobody had reviewed. A copy
 installed from the BApp Store does not check at all — Burp updates it.
 
+## What it keeps
+
+- **Which requests Burp has made** — host, path and method, nothing else, at
+  most 100,000 paths, in memory. *Requested* starts counting when the
+  extension is loaded; *Analyse proxy history* adds what the browser asked for
+  before that. A call is matched by method, host and the shape of its path
+  (`/users/{id}` matches `/users/42`); where the code builds a URL on a base
+  nobody has revealed, the host shown is a guess and the path alone is matched.
+- **The session your browser used** — the Cookie, Authorization and CSRF /
+  API-key headers it last sent to each host through the proxy. In memory
+  only, never written or logged, and only ever added to a Repeater request
+  for the host they were sent to. Untick *Borrow the browser's session* and
+  they are not used.
+- **What you ruled out** — for each value marked *Not a secret*, its type and
+  a fingerprint (the first 16 hex digits of its SHA-256), in Burp's
+  preferences. Never the value.
+
 ## How it is verified
 
 - **Against a mocked Burp API.** `./gradlew harness` loads the real extension
@@ -82,17 +99,21 @@ installed from the BApp Store does not check at all — Burp updates it.
 - **Against a second implementation.** The engine is a port of the Python
   analysis in [xtawb/deepjs](https://github.com/xtawb/deepjs), a command-line
   tool with the same rules. `tools/parity.py` feeds identical input to both and
-  compares every record they produce. They agree on that project's accuracy
-  corpus, its end-to-end fixture, a generated set of credential / HTML /
-  source-map shapes, seven real applications and nineteen well-known libraries
-  (26 MB of JavaScript, 2,247 records). CI runs the built-in sets on every push
-  and once a week.
+  compares every record they produce — twice: masked, as a client sees them by
+  default, and revealed, with the code of every finding, as this extension
+  uses them. They agree on that project's accuracy corpus, its end-to-end
+  fixture, a generated set of credential / HTML / source-map shapes, seven
+  real applications and nineteen well-known libraries (26 MB of JavaScript,
+  2,247 records). CI runs the built-in sets on every push and once a week.
 
 - **In Burp.** 0.4.0 was loaded and used in Burp Suite Community 2026.9.1. That
   first real session reported four secrets and all four were false positives —
   the token types of a syntax highlighter's grammar, and the page tokens of a
   third-party embed. Both are fixed and are now tests; later versions have been
   through the harness, which CI runs, but CI cannot load the jar into Burp.
+  The interface added in 0.6.0 (the code view, *Requested*, the host filter,
+  *Not a secret*, the borrowed session) has been driven through the harness
+  and painted off screen to look at its layout — not yet used in Burp itself.
 
 ## Compared with the JavaScript extensions in the BApp Store
 
@@ -124,7 +145,7 @@ python tools/parity.py --classpath build/libs/deepjs-burp.jar --engine ../deepjs
 
 | Package | Role |
 |---|---|
-| `deepjs.burp` | the extension: Montoya API glue (`DeepJsExtension`), the Swing tab (`DeepJsTab`), the analysis thread (`Analyzer`) |
+| `deepjs.burp` | the extension: Montoya API glue (`DeepJsExtension`), the Swing tab (`DeepJsTab`, `CodeView`), the analysis thread (`Analyzer`), what Burp has requested (`Traffic`) and with which session (`Sessions`) |
 | `deepjs.engine` | the analysis: tokenizer, expression evaluation, endpoints, secrets, hosts, chunk discovery, source maps |
 
 The engine has no knowledge of Burp and can be driven on its own:
@@ -138,6 +159,10 @@ stdin / stdout.
   `{placeholder}`. For an endpoint whose base URL is not known, the full URL
   shown is a best guess (the site the script came from).
 - **It analyses what Burp sees.** It does not crawl.
+- ***Requested* is a comparison of shapes.** A request counts for a call when
+  method, host and path shape agree. A call whose path is computed at run
+  time can be listed as not requested when it was, and a path that happens to
+  fit a template counts for it.
 - **Obfuscated bundles** (string-array rotation, control-flow flattening)
   defeat this kind of analysis.
 - Secrets are found by format and by name. A finding is a lead to check, not a

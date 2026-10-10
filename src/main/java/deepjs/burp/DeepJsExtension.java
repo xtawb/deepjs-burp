@@ -8,6 +8,7 @@ import burp.api.montoya.http.handler.HttpRequestToBeSent;
 import burp.api.montoya.http.handler.HttpResponseReceived;
 import burp.api.montoya.http.handler.RequestToBeSentAction;
 import burp.api.montoya.http.handler.ResponseReceivedAction;
+import burp.api.montoya.http.message.HttpHeader;
 import burp.api.montoya.http.message.HttpRequestResponse;
 import burp.api.montoya.http.message.MimeType;
 import burp.api.montoya.http.message.requests.HttpRequest;
@@ -50,7 +51,9 @@ import javax.swing.Timer;
  * "DeepJS" tab: API calls with method, parameters and body fields; secrets;
  * hosts; and the scripts and source maps the code names but no page has
  * loaded — which the extension can then request through Burp, so they land in
- * the site map and are analysed too.
+ * the site map and are analysed too. Each call is set against what Burp has
+ * actually requested ({@link Traffic}): the ones nobody has made yet are the
+ * part of the API the application's pages did not show.
  *
  * The engine never touches the network: every request is made here, through
  * Burp, and only when the user has left "Fetch hidden scripts" / "Fetch source
@@ -66,6 +69,7 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
     static final String RELEASES_PAGE = "https://github.com/xtawb/deepjs-burp/releases/latest";
     private static final int MAX_QUEUED = 32;                   // responses waiting for analysis during a history pass
     private static final int MAX_NOTES_LINES = 40;
+    private static final String DISMISSED = "deepjs.dismissed";    // the preference that holds what the user ruled out
     private static final Pattern VERSION_SHAPE = Pattern.compile("\\d{1,9}(\\.\\d{1,9}){0,5}");
 
     private MontoyaApi api;
@@ -80,6 +84,8 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
     private final Map<String, String> pendingFetch = Collections.synchronizedMap(new LinkedHashMap<>());   // url → kind
     private final Set<String> fetched = ConcurrentHashMap.newKeySet();
     private final Set<String> reportedSecrets = ConcurrentHashMap.newKeySet();
+    private final Traffic traffic = new Traffic();
+    private final Sessions sessions = new Sessions();
     private final AtomicInteger fetchCount = new AtomicInteger();
     private final AtomicInteger analysedCount = new AtomicInteger();
     private volatile String notice = "";              // shown in the status line: "update available: 0.5.0"
@@ -136,6 +142,7 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
         }
         fetchPool.shutdownNow();
         analyzer.shutdown();
+        sessions.clear();
     }
 
     // ── settings ─────────────────────────────────────────────────────────────
@@ -147,6 +154,17 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
                 box.setSelected(v);
             }
         });
+        String dismissed = prefs.getString(DISMISSED);
+        if (dismissed != null && !dismissed.isEmpty()) {
+            tab.setDismissed(Arrays.asList(dismissed.split("\n")));
+        }
+        tab.settingsLoaded();
+    }
+
+    @Override
+    public void dismissalsChanged() {
+        // the type and fingerprint of each value, never the value: a preferences file is no place for a credential
+        prefs.setString(DISMISSED, String.join("\n", tab.dismissedIds()));
     }
 
     @Override
@@ -161,7 +179,33 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
 
     @Override
     public RequestToBeSentAction handleHttpRequestToBeSent(HttpRequestToBeSent request) {
+        try {
+            noteRequest(request, request.toolSource().isFromTool(ToolType.PROXY));
+        } catch (RuntimeException e) {
+            api.logging().logToError("DeepJS: " + e);
+        }
         return RequestToBeSentAction.continueWith(request);
+    }
+
+    /**
+     * A request Burp is sending, or sent before the extension was loaded. Its method and path say
+     * which endpoints have been requested; when the browser made it, its headers say what a
+     * session with that host looks like.
+     */
+    private void noteRequest(HttpRequest request, boolean fromBrowser) {
+        String url = request.url();
+        synchronized (traffic) {                            // with onMessage: a row and the mark on it arrive in order
+            List<String> first = traffic.saw(request.method(), url);
+            if (!first.isEmpty()) {
+                tab.markRequested(first);
+            }
+        }
+        if (fromBrowser) {
+            String host = Traffic.hostOf(url);
+            for (HttpHeader header : request.headers()) {
+                sessions.note(host, header.name(), header.value());
+            }
+        }
     }
 
     @Override
@@ -253,24 +297,32 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
         switch (f[0]) {
             case "E" -> {
                 if (f.length >= 10) {
-                    // E method full url kind query body headers file line confidence
-                    String[] row = {f[1].isEmpty() ? "?" : f[1], f[2], f[5], f[6], f[7], f[4], f[8] + ":" + f[9]};
-                    tab.putEndpoint(f[1] + " " + f[3], row);
+                    // E method full url kind query body headers file line confidence [before span after]
+                    String key = f[1] + " " + f[3];
+                    synchronized (traffic) {
+                        // `{apiUrl}/users`: the host shown is a guess, so a request is matched on the path alone
+                        boolean requested = traffic.watch(key, f[1], f[2], f[3].startsWith("{"));
+                        tab.putEndpoint(key, new String[]{f[1].isEmpty() ? "?" : f[1], f[2], f[5], f[6], f[7], f[4], f[8] + ":" + f[9],
+                                requested ? "yes" : "no", field(f, 11), field(f, 12), field(f, 13)});
+                    }
                 }
             }
             case "W" -> {
                 // the engine replaced this endpoint with a better one (base URL resolved, string → call)
                 if (f.length >= 3) {
-                    tab.removeEndpoint(f[1] + " " + f[2]);
+                    synchronized (traffic) {
+                        traffic.forget(f[1] + " " + f[2]);
+                        tab.removeEndpoint(f[1] + " " + f[2]);
+                    }
                 }
             }
             case "S" -> {
                 if (f.length >= 10) {
-                    // S severity kind value key file line note fingerprint public
-                    boolean isPublic = "1".equals(f[9]);
-                    String[] row = {f[1], f[2], f[3], f[4], f[5] + ":" + f[6], f[7]};
-                    tab.putSecret(f[2] + " " + f[8], row);
-                    if (!isPublic && tab.raiseIssues.isSelected() && reportedSecrets.add(f[2] + " " + f[8])) {
+                    // S severity kind value key file line note fingerprint public [before span after]
+                    String id = f[2] + " " + f[8];
+                    tab.putSecret(id, new String[]{f[1], f[2], f[3], f[4], f[5] + ":" + f[6], f[7],
+                            field(f, 10), field(f, 11), field(f, 12)});
+                    if (!"1".equals(f[9]) && tab.raiseIssues.isSelected() && !tab.isDismissed(id) && reportedSecrets.add(id)) {
                         raiseIssue(f);
                     }
                 }
@@ -294,6 +346,10 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
             case "D" -> analysedCount.incrementAndGet();
             default -> { }
         }
+    }
+
+    private static String field(String[] record, int i) {
+        return i < record.length ? record[i] : "";
     }
 
     // ── update notice ────────────────────────────────────────────────────────
@@ -552,10 +608,13 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
     @Override
     public void analyseProxyHistory() {
         background("deepjs-history", () -> {
-            int queued = 0;
+            int queued = 0, noted = 0;
             for (ProxyHttpRequestResponse item : api.proxy().history()) {
                 try {
-                    if (consider(item.finalRequest(), item.originalResponse())) {
+                    HttpRequest sent = item.finalRequest();
+                    noteRequest(sent, true);                // what the browser asked for before DeepJS was listening
+                    noted++;
+                    if (consider(sent, item.originalResponse())) {
                         queued++;
                         // a large history must not be copied into memory all at once: keep pace with the analysis
                         while (analyzer.pending() > MAX_QUEUED) {
@@ -569,7 +628,7 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
                     // one odd history entry must not stop the pass
                 }
             }
-            tab.log("proxy history: " + queued + " response(s) queued for analysis");
+            tab.log("proxy history: " + queued + " response(s) queued for analysis, " + noted + " request(s) noted as made");
         });
     }
 
@@ -583,12 +642,15 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
         fetchCount.set(0);
         analysedCount.set(0);
         analyzer.reset();
-        tab.clearTables();
+        synchronized (traffic) {
+            traffic.forgetEndpoints();                      // the findings go; what Burp has requested stays true
+            tab.clearTables();
+        }
     }
 
     @Override
     public void sendToRepeater(List<String[]> rows) {
-        int sent = 0;
+        int sent = 0, signedIn = 0;
         for (String[] row : rows) {
             try {
                 HttpRequest req = buildRequest(row);
@@ -596,13 +658,20 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
                     String path = row[DeepJsTab.E_URL].replaceFirst("^[a-z]+://[^/]+", "");
                     api.repeater().sendToRepeater(req, "DeepJS " + row[DeepJsTab.E_METHOD] + " " + shorten(path));
                     sent++;
+                    signedIn += sessionFor(row[DeepJsTab.E_URL]).isEmpty() ? 0 : 1;
                 }
             } catch (RuntimeException e) {
                 tab.log("could not build a request for " + row[DeepJsTab.E_URL] + ": " + e.getMessage());
             }
         }
-        tab.log(sent + " request(s) sent to Repeater" + (sent < rows.size()
-                ? " — " + (rows.size() - sent) + " skipped (no absolute URL is known for them)" : ""));
+        tab.log(sent + " request(s) sent to Repeater"
+                + (signedIn > 0 ? ", " + signedIn + " with the session your browser last used on that host" : "")
+                + (sent < rows.size() ? " — " + (rows.size() - sent) + " skipped (no absolute URL is known for them)" : ""));
+    }
+
+    /** The session headers to add to a request for `url`: none unless the user wants them and the host has been seen. */
+    private List<String[]> sessionFor(String url) {
+        return tab.withSession.isSelected() ? sessions.headersFor(Traffic.hostOf(url)) : List.of();
     }
 
     private static String shorten(String s) {
@@ -653,6 +722,9 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
         String body = requestBody(row);
         if (body != null && !method.equals("GET") && !method.equals("?")) {
             req = req.withAddedHeader("Content-Type", "application/json").withBody(body);
+        }
+        for (String[] header : sessionFor(url)) {
+            req = req.withAddedHeader(header[0], header[1]);
         }
         return req;
     }

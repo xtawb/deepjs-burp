@@ -3,25 +3,33 @@ package deepjs.burp;
 import java.awt.BorderLayout;
 import java.awt.Color;
 import java.awt.Component;
-import java.awt.FlowLayout;
 import java.awt.Font;
 import java.awt.Toolkit;
 import java.awt.datatransfer.StringSelection;
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Iterator;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
 import java.util.function.Consumer;
-import java.util.regex.Pattern;
 import javax.swing.BorderFactory;
 import javax.swing.Box;
+import javax.swing.DefaultComboBoxModel;
 import javax.swing.JButton;
 import javax.swing.JCheckBox;
+import javax.swing.JComboBox;
 import javax.swing.JLabel;
 import javax.swing.JMenuItem;
 import javax.swing.JPanel;
 import javax.swing.JPopupMenu;
 import javax.swing.JScrollPane;
+import javax.swing.JSplitPane;
 import javax.swing.JTabbedPane;
 import javax.swing.JTable;
 import javax.swing.JTextArea;
@@ -53,6 +61,8 @@ final class DeepJsTab extends JPanel {
         void clearAll();
 
         void settingsChanged();
+
+        void dismissalsChanged();
 
         void openReleasePage();
     }
@@ -92,6 +102,14 @@ final class DeepJsTab extends JPanel {
             return rows.get(order.get(modelIndex));
         }
 
+        String key(int modelIndex) {
+            return order.get(modelIndex);
+        }
+
+        String[] get(String key) {
+            return rows.get(key);
+        }
+
         void clear() {
             rows.clear();
             order.clear();
@@ -120,11 +138,15 @@ final class DeepJsTab extends JPanel {
         }
     }
 
-    // Endpoint row layout — also what Actions.sendToRepeater receives.
-    static final int E_METHOD = 0, E_URL = 1, E_QUERY = 2, E_BODY = 3, E_HEADERS = 4, E_KIND = 5, E_SOURCE = 6;
-    static final int S_VALUE = 2;
+    // Endpoint row layout — also what Actions.sendToRepeater receives. A row carries more than the
+    // table shows: after the columns comes the code the finding was read from (before, span, after).
+    static final int E_METHOD = 0, E_URL = 1, E_QUERY = 2, E_BODY = 3, E_HEADERS = 4, E_KIND = 5, E_SOURCE = 6, E_SEEN = 7,
+            E_BEFORE = 8, E_SPAN = 9, E_AFTER = 10;
+    static final int S_SEVERITY = 0, S_VALUE = 2, S_SOURCE = 4, S_BEFORE = 6, S_SPAN = 7, S_AFTER = 8;
+    static final String ALL_HOSTS = "All hosts";
+    private static final int MAX_DISMISSED = 5000;
 
-    final KeyedModel endpoints = new KeyedModel("Method", "URL", "Query", "Body", "Headers", "Found as", "Source");
+    final KeyedModel endpoints = new KeyedModel("Method", "URL", "Query", "Body", "Headers", "Found as", "Source", "Requested");
     final KeyedModel secrets = new KeyedModel("Severity", "Type", "Value", "Key", "Source", "Note");
     final KeyedModel scripts = new KeyedModel("Script / source map", "Kind", "Status");
     final KeyedModel hosts = new KeyedModel("Host", "Class", "Service", "Non-production");
@@ -134,7 +156,11 @@ final class DeepJsTab extends JPanel {
     final JCheckBox fetchHidden = new JCheckBox("Fetch hidden scripts", true);
     final JCheckBox fetchMaps = new JCheckBox("Fetch source maps", true);
     final JCheckBox raiseIssues = new JCheckBox("Report secrets as issues", true);
-    final JCheckBox showStrings = new JCheckBox("Show string-only paths", true);
+    final JCheckBox showStrings = new JCheckBox("Show string-only paths", false);
+    final JCheckBox onlyUnrequested = new JCheckBox("Only not requested yet", false);
+    final JCheckBox withSession = new JCheckBox("Borrow the browser's session", true);
+    final JCheckBox showDismissed = new JCheckBox("Show dismissed", false);
+    final JComboBox<String> hostFilter = new JComboBox<>(new DefaultComboBoxModel<>(new String[]{ALL_HOSTS}));
     final JCheckBox updateCheck = new JCheckBox("Check for updates when Burp starts", true);
     final JButton updateButton = new JButton("Open download page");
     final JCheckBox maskValues = new JCheckBox("Mask values", false);
@@ -143,9 +169,15 @@ final class DeepJsTab extends JPanel {
     private final JTextArea other = new JTextArea();
     private final JTextArea log = new JTextArea();
     private final JTabbedPane tabs = new JTabbedPane();
-    private final JTextField filter = new JTextField(22);
-    private final JTable endpointTable = new JTable(endpoints);
+    final JTextField filter = new JTextField(22);
+    final JTable endpointTable = new JTable(endpoints);
+    final JTable secretTable = new JTable(secrets);
+    final CodeView endpointCode = new CodeView();
+    final CodeView secretCode = new CodeView();
     private final TableRowSorter<KeyedModel> endpointSorter = new TableRowSorter<>(endpoints);
+    private final TableRowSorter<KeyedModel> secretSorter = new TableRowSorter<>(secrets);
+    private final TreeSet<String> knownHosts = new TreeSet<>();
+    private final Set<String> dismissed = Collections.synchronizedSet(new LinkedHashSet<>());    // secrets the user ruled out
     private final Map<String, List<String>> otherItems = new LinkedHashMap<>();
     private final Actions actions;
 
@@ -159,20 +191,24 @@ final class DeepJsTab extends JPanel {
         tabs.addTab("API calls", endpointPanel());
         tabs.addTab("Secrets", secretsPanel());
         tabs.addTab("Hidden scripts", scriptsPanel());
-        tabs.addTab("Hosts", tablePanel(hosts, new int[]{320, 110, 110, 110}, false));
+        tabs.addTab("Hosts", tablePanel(hosts, new int[]{320, 110, 110, 110}));
         tabs.addTab("Routes · GraphQL · packages", textPanel(other));
         tabs.addTab("Log / settings", settingsPanel());
 
         for (KeyedModel m : new KeyedModel[]{endpoints, secrets, scripts, hosts}) {
-            m.addTableModelListener(e -> refreshTitles());
+            // later: the tables hear about a change after this listener does, and the titles count what they show
+            m.addTableModelListener(e -> SwingUtilities.invokeLater(this::refreshTitles));
         }
-        refreshTitles();
+        applyFilter();
+        applySecretFilter();
+        showEndpointCode();
+        showSecretCode();
     }
 
     // ── layout ───────────────────────────────────────────────────────────────
 
     private JPanel toolbar() {
-        JPanel bar = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
+        JPanel bar = new JPanel(new WrapLayout());
         for (JCheckBox box : new JCheckBox[]{enabled, scopeOnly, fetchHidden, fetchMaps, raiseIssues}) {
             box.addActionListener(e -> actions.settingsChanged());
             bar.add(box);
@@ -198,24 +234,45 @@ final class DeepJsTab extends JPanel {
 
     private JPanel endpointPanel() {
         endpointTable.setRowSorter(endpointSorter);
+        endpointSorter.setSortsOnUpdates(true);             // a call that has just been requested may no longer belong in the list
         endpointTable.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         endpointTable.setAutoCreateColumnsFromModel(false);
-        widths(endpointTable, new int[]{70, 520, 160, 180, 150, 80, 320});
+        widths(endpointTable, new int[]{70, 520, 160, 180, 150, 80, 320, 80});
         endpointTable.getColumnModel().getColumn(E_METHOD).setCellRenderer(new MethodRenderer());
+        endpointTable.getColumnModel().getColumn(E_SEEN).setCellRenderer(new SeenRenderer());
+        endpointTable.moveColumn(E_SEEN, E_URL + 1);
+        endpointTable.getSelectionModel().addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) {
+                showEndpointCode();
+            }
+        });
 
         filter.getDocument().addDocumentListener(new DocumentListener() {
             public void insertUpdate(DocumentEvent e) { applyFilter(); }
             public void removeUpdate(DocumentEvent e) { applyFilter(); }
             public void changedUpdate(DocumentEvent e) { applyFilter(); }
         });
-        showStrings.addActionListener(e -> applyFilter());
+        showStrings.addActionListener(e -> {
+            actions.settingsChanged();
+            applyFilter();
+        });
         showStrings.setToolTipText("Paths that appear as strings but were not seen at a recognised call site");
+        onlyUnrequested.addActionListener(e -> applyFilter());
+        onlyUnrequested.setToolTipText("Hide the calls Burp has already made: what is left is what the application's pages never led you to");
+        hostFilter.addActionListener(e -> applyFilter());
+        withSession.addActionListener(e -> actions.settingsChanged());
+        withSession.setToolTipText("Send to Repeater adds the Cookie, Authorization and CSRF / API-key headers your browser last sent "
+                + "to the same host through the proxy. They are kept in memory only.");
 
-        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
+        JPanel top = new JPanel(new WrapLayout());
         top.add(new JLabel("Filter:"));
         top.add(filter);
+        top.add(hostFilter);
         top.add(showStrings);
+        top.add(onlyUnrequested);
+        top.add(Box.createHorizontalStrut(10));
         top.add(button("Send to Repeater", e -> actions.sendToRepeater(selectedEndpoints())));
+        top.add(withSession);
         top.add(button("Copy URLs", e -> copy(selectedEndpoints(), E_URL)));
 
         JPopupMenu menu = new JPopupMenu();
@@ -229,15 +286,23 @@ final class DeepJsTab extends JPanel {
 
         JPanel p = new JPanel(new BorderLayout());
         p.add(top, BorderLayout.NORTH);
-        p.add(new JScrollPane(endpointTable), BorderLayout.CENTER);
+        p.add(above(endpointTable, endpointCode), BorderLayout.CENTER);
         return p;
     }
 
+    /** A table with, under it, the code its selected row was read from. */
+    private static JSplitPane above(JTable table, CodeView code) {
+        JSplitPane split = new JSplitPane(JSplitPane.VERTICAL_SPLIT, new JScrollPane(table), code);
+        split.setResizeWeight(0.72);
+        split.setBorder(null);
+        return split;
+    }
+
     private JPanel scriptsPanel() {
-        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
+        JPanel top = new JPanel(new WrapLayout());
         top.add(new JLabel("Scripts and source maps the analysed code refers to — the parts of the app no page has loaded."));
         top.add(button("Fetch now", e -> actions.fetchHiddenNow()));
-        JPanel p = tablePanel(scripts, new int[]{760, 110, 180}, false);
+        JPanel p = tablePanel(scripts, new int[]{760, 110, 180});
         p.add(top, BorderLayout.NORTH);
         return p;
     }
@@ -251,49 +316,68 @@ final class DeepJsTab extends JPanel {
     }
 
     private JPanel secretsPanel() {
-        JPanel p = tablePanel(secrets, new int[]{70, 190, 320, 140, 300, 420}, true);
-        JTable table = (JTable) ((JScrollPane) p.getComponent(0)).getViewport().getView();
-        table.getColumnModel().getColumn(S_VALUE).setCellRenderer(new DefaultTableCellRenderer() {
-            @Override
-            protected void setValue(Object value) {
-                String text = String.valueOf(value);
-                setText(maskValues.isSelected() ? mask(text) : text);
+        secretTable.setRowSorter(secretSorter);
+        widths(secretTable, new int[]{70, 190, 320, 140, 300, 420});
+        secretTable.setDefaultRenderer(Object.class, new SecretRenderer());
+        JPopupMenu menu = copyCellMenu(secretTable);
+        JMenuItem dismiss = new JMenuItem("Not a secret: hide it, here and from now on");
+        dismiss.addActionListener(e -> dismissSelected(true));
+        JMenuItem restore = new JMenuItem("A secret after all: bring it back");
+        restore.addActionListener(e -> dismissSelected(false));
+        menu.add(dismiss);
+        menu.add(restore);
+        secretTable.getSelectionModel().addListSelectionListener(e -> {
+            if (!e.getValueIsAdjusting()) {
+                showSecretCode();
             }
         });
-        maskValues.setToolTipText("Show only the first and last characters of each value (for screenshots and screen sharing). "
-                + "\"Copy cell\" still copies the whole value.");
+
+        maskValues.setToolTipText("Show only the first and last characters of each value, in the table and in the code under it "
+                + "(for screenshots and screen sharing). \"Copy cell\" still copies the whole value.");
         maskValues.addActionListener(e -> {
             actions.settingsChanged();
-            table.repaint();
+            secretTable.repaint();
+            showSecretCode();
+            showEndpointCode();
         });
-        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
+        showDismissed.setToolTipText("Also list the values you marked \"Not a secret\" (in grey). The choice is remembered by value, "
+                + "so the same value is not reported again on another site.");
+        showDismissed.addActionListener(e -> applySecretFilter());
+
+        JPanel top = new JPanel(new WrapLayout());
         top.add(new JLabel("Values are shown as found. Nothing found is ever sent anywhere or tried."));
         top.add(maskValues);
+        top.add(showDismissed);
+        JPanel p = new JPanel(new BorderLayout());
         p.add(top, BorderLayout.NORTH);
+        p.add(above(secretTable, secretCode), BorderLayout.CENTER);
         return p;
     }
 
-    private JPanel tablePanel(KeyedModel model, int[] columnWidths, boolean severityColours) {
+    private JPanel tablePanel(KeyedModel model, int[] columnWidths) {
         JTable t = new JTable(model);
         t.setAutoCreateRowSorter(true);
         widths(t, columnWidths);
-        if (severityColours) {
-            t.getColumnModel().getColumn(0).setCellRenderer(new SeverityRenderer());
-        }
+        copyCellMenu(t);
+        JPanel p = new JPanel(new BorderLayout());
+        p.add(new JScrollPane(t), BorderLayout.CENTER);
+        return p;
+    }
+
+    /** Cells can be selected one at a time, and the context menu copies the one selected. */
+    private static JPopupMenu copyCellMenu(JTable t) {
         JPopupMenu menu = new JPopupMenu();
         JMenuItem copyCell = new JMenuItem("Copy cell");
         copyCell.addActionListener(e -> {
             int r = t.getSelectedRow(), c = t.getSelectedColumn();
             if (r >= 0 && c >= 0) {
-                clipboard(String.valueOf(t.getValueAt(r, c)));
+                clipboard(String.valueOf(t.getValueAt(r, c)));     // the value itself, masked on screen or not
             }
         });
         menu.add(copyCell);
         t.setComponentPopupMenu(menu);
         t.setCellSelectionEnabled(true);
-        JPanel p = new JPanel(new BorderLayout());
-        p.add(new JScrollPane(t), BorderLayout.CENTER);
-        return p;
+        return menu;
     }
 
     private static JPanel textPanel(JTextArea area) {
@@ -305,7 +389,7 @@ final class DeepJsTab extends JPanel {
     }
 
     private JPanel settingsPanel() {
-        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
+        JPanel top = new JPanel(new WrapLayout());
         top.add(updateCheck);
         updateCheck.setToolTipText("One request to api.github.com, sent through Burp, to see whether a newer DeepJS has been released");
         updateCheck.addActionListener(e -> actions.settingsChanged());
@@ -326,16 +410,136 @@ final class DeepJsTab extends JPanel {
 
     // ── behaviour ────────────────────────────────────────────────────────────
 
+    private static String cell(String[] row, int column) {
+        return column < row.length ? row[column] : "";
+    }
+
+    /** Which API calls are listed: the text typed, one host, with or without bare strings, requested or not. */
     private void applyFilter() {
-        String text = filter.getText().trim();
-        List<RowFilter<KeyedModel, Integer>> all = new ArrayList<>();
-        if (!text.isEmpty()) {
-            all.add(RowFilter.regexFilter("(?i)" + Pattern.quote(text)));
+        String text = filter.getText().trim().toLowerCase(Locale.ROOT);
+        Object chosen = hostFilter.getSelectedItem();
+        String host = chosen == null || ALL_HOSTS.equals(chosen) ? null : chosen.toString();
+        boolean strings = showStrings.isSelected(), unrequested = onlyUnrequested.isSelected();
+        endpointSorter.setRowFilter(new RowFilter<KeyedModel, Integer>() {
+            @Override
+            public boolean include(Entry<? extends KeyedModel, ? extends Integer> entry) {
+                String[] row = endpoints.row(entry.getIdentifier());
+                if ((!strings && cell(row, E_KIND).equals("string")) || (unrequested && cell(row, E_SEEN).equals("yes"))
+                        || (host != null && !host.equals(Traffic.hostOf(cell(row, E_URL))))) {
+                    return false;
+                }
+                if (text.isEmpty()) {
+                    return true;
+                }
+                for (int c = 0; c <= E_SOURCE; c++) {
+                    if (cell(row, c).toLowerCase(Locale.ROOT).contains(text)) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        });
+        refreshTitles();
+    }
+
+    private void applySecretFilter() {
+        boolean all = showDismissed.isSelected();
+        secretSorter.setRowFilter(new RowFilter<KeyedModel, Integer>() {
+            @Override
+            public boolean include(Entry<? extends KeyedModel, ? extends Integer> entry) {
+                return all || !dismissed.contains(secrets.key(entry.getIdentifier()));
+            }
+        });
+        refreshTitles();
+    }
+
+    /** The row the selection rests on, or null. */
+    private static String[] selected(JTable table, KeyedModel model) {
+        int viewRow = table.getSelectionModel().getLeadSelectionIndex();
+        if (viewRow < 0 || viewRow >= table.getRowCount() || !table.getSelectionModel().isSelectedIndex(viewRow)) {
+            return null;
         }
-        if (!showStrings.isSelected()) {
-            all.add(RowFilter.notFilter(RowFilter.regexFilter("^string$", E_KIND)));
+        return model.row(table.convertRowIndexToModel(viewRow));
+    }
+
+    private static boolean hasCode(String[] row, int before) {
+        return !(cell(row, before) + cell(row, before + 1) + cell(row, before + 2)).isEmpty();
+    }
+
+    private void showEndpointCode() {
+        String[] row = selected(endpointTable, endpoints);
+        if (row == null) {
+            endpointCode.clear("Select a call to see the code it was read from.");
+        } else if (!hasCode(row, E_BEFORE)) {
+            endpointCode.clear(cell(row, E_SOURCE) + "  ·  not read from script code (an HTML form, robots.txt, a sitemap)");
+        } else {
+            endpointCode.show(cell(row, E_SOURCE) + "  ·  found as " + cell(row, E_KIND),
+                    cell(row, E_BEFORE), cell(row, E_SPAN), cell(row, E_AFTER), concealed());
         }
-        endpointSorter.setRowFilter(all.isEmpty() ? null : RowFilter.andFilter(all));
+    }
+
+    private void showSecretCode() {
+        String[] row = selected(secretTable, secrets);
+        if (row == null) {
+            secretCode.clear("Select a value to see the code it was read from.");
+        } else if (!hasCode(row, S_BEFORE)) {
+            secretCode.clear(cell(row, S_SOURCE));
+        } else {
+            secretCode.show(cell(row, S_SOURCE), cell(row, S_BEFORE), cell(row, S_SPAN), cell(row, S_AFTER), concealed());
+        }
+    }
+
+    /** With "Mask values" on, no value in the Secrets table may be readable in a code view either. */
+    private List<String> concealed() {
+        List<String> values = new ArrayList<>();
+        if (maskValues.isSelected()) {
+            for (int r = 0; r < secrets.getRowCount(); r++) {
+                values.add(cell(secrets.row(r), S_VALUE));
+            }
+        }
+        return values;
+    }
+
+    private void dismissSelected(boolean dismiss) {
+        List<String> ids = new ArrayList<>();
+        for (int viewRow : secretTable.getSelectedRows()) {
+            ids.add(secrets.key(secretTable.convertRowIndexToModel(viewRow)));
+        }
+        if (dismiss ? !dismissed.addAll(ids) : !dismissed.removeAll(ids)) {
+            return;
+        }
+        synchronized (dismissed) {
+            for (Iterator<String> oldest = dismissed.iterator(); dismissed.size() > MAX_DISMISSED; oldest.remove()) {
+                oldest.next();
+            }
+        }
+        applySecretFilter();
+        secretTable.repaint();
+        actions.dismissalsChanged();
+    }
+
+    /** Has the user ruled this secret out? `id`: its key in the secrets table (type + fingerprint). Any thread. */
+    boolean isDismissed(String id) {
+        return dismissed.contains(id);
+    }
+
+    List<String> dismissedIds() {
+        synchronized (dismissed) {
+            return new ArrayList<>(dismissed);
+        }
+    }
+
+    void setDismissed(Collection<String> ids) {
+        dismissed.clear();
+        dismissed.addAll(ids);
+    }
+
+    /** Options and dismissals were set from saved preferences, not by a click: list accordingly. */
+    void settingsLoaded() {
+        onEdt(() -> {
+            applyFilter();
+            applySecretFilter();
+        });
     }
 
     List<String[]> selectedEndpoints() {
@@ -363,8 +567,9 @@ final class DeepJsTab extends JPanel {
     }
 
     private void refreshTitles() {
-        tabs.setTitleAt(0, "API calls (" + endpoints.getRowCount() + ")");
-        tabs.setTitleAt(1, "Secrets (" + secrets.getRowCount() + ")");
+        int shown = endpointTable.getRowCount(), all = endpoints.getRowCount();
+        tabs.setTitleAt(0, "API calls (" + (shown == all ? "" : shown + " of ") + all + ")");
+        tabs.setTitleAt(1, "Secrets (" + secretTable.getRowCount() + ")");
         tabs.setTitleAt(2, "Hidden scripts (" + scripts.getRowCount() + ")");
         tabs.setTitleAt(3, "Hosts (" + hosts.getRowCount() + ")");
     }
@@ -380,7 +585,29 @@ final class DeepJsTab extends JPanel {
     // ── updates from the extension (any thread) ──────────────────────────────
 
     void putEndpoint(String key, String[] row) {
-        onEdt(() -> endpoints.upsert(key, row));
+        onEdt(() -> {
+            endpoints.upsert(key, row);
+            String host = Traffic.hostOf(cell(row, E_URL));
+            if (!host.isEmpty() && knownHosts.add(host)) {
+                // kept in order; inserting does not disturb what is selected
+                ((DefaultComboBoxModel<String>) hostFilter.getModel())
+                        .insertElementAt(host, 1 + knownHosts.headSet(host).size());
+            }
+        });
+    }
+
+    /** Burp has now made a request for each of these endpoints. */
+    void markRequested(Collection<String> keys) {
+        onEdt(() -> {
+            for (String key : keys) {
+                String[] row = endpoints.get(key);
+                if (row != null && row.length > E_SEEN && !row[E_SEEN].equals("yes")) {
+                    String[] requested = row.clone();
+                    requested[E_SEEN] = "yes";
+                    endpoints.upsert(key, requested);
+                }
+            }
+        });
     }
 
     void removeEndpoint(String key) {
@@ -462,11 +689,15 @@ final class DeepJsTab extends JPanel {
             hosts.clear();
             otherItems.clear();
             other.setText("");
+            knownHosts.clear();
+            hostFilter.setModel(new DefaultComboBoxModel<>(new String[]{ALL_HOSTS}));
+            applyFilter();
         });
     }
 
     void forEachOption(Consumer<JCheckBox> c) {
-        for (JCheckBox box : new JCheckBox[]{enabled, scopeOnly, fetchHidden, fetchMaps, raiseIssues, updateCheck, maskValues}) {
+        for (JCheckBox box : new JCheckBox[]{enabled, scopeOnly, fetchHidden, fetchMaps, raiseIssues, updateCheck, maskValues,
+                showStrings, withSession}) {
             c.accept(box);
         }
     }
@@ -491,18 +722,44 @@ final class DeepJsTab extends JPanel {
         }
     }
 
-    private static final class SeverityRenderer extends DefaultTableCellRenderer {
+    /** "no" is the answer worth noticing: a call the code makes that nobody has made yet. */
+    private static final class SeenRenderer extends DefaultTableCellRenderer {
         @Override
         public Component getTableCellRendererComponent(JTable t, Object v, boolean sel, boolean focus, int r, int c) {
             Component comp = super.getTableCellRendererComponent(t, v, sel, focus, r, c);
+            boolean pending = "no".equals(v);
             if (!sel) {
-                comp.setForeground(switch (String.valueOf(v)) {
-                    case "critical", "high" -> new Color(0xC62828);
-                    case "medium" -> new Color(0xB26A00);
-                    case "low" -> new Color(0x1565C0);
-                    default -> Color.GRAY;
-                });
+                comp.setForeground(pending ? new Color(0xB26A00) : Color.GRAY);
             }
+            setFont(getFont().deriveFont(pending ? Font.BOLD : Font.PLAIN));
+            return comp;
+        }
+    }
+
+    /** Every cell of the secrets table: severity in colour, the value masked on request, a dismissed row in grey. */
+    private final class SecretRenderer extends DefaultTableCellRenderer {
+        @Override
+        public Component getTableCellRendererComponent(JTable t, Object v, boolean sel, boolean focus, int r, int c) {
+            int column = t.convertColumnIndexToModel(c);
+            String text = String.valueOf(v);
+            Component comp = super.getTableCellRendererComponent(
+                    t, column == S_VALUE && maskValues.isSelected() ? mask(text) : text, sel, focus, r, c);
+            boolean gone = dismissed.contains(secrets.key(t.convertRowIndexToModel(r)));
+            if (!sel) {
+                Color colour = t.getForeground();
+                if (gone) {
+                    colour = Color.GRAY;
+                } else if (column == S_SEVERITY) {
+                    colour = switch (text) {
+                        case "critical", "high" -> new Color(0xC62828);
+                        case "medium" -> new Color(0xB26A00);
+                        case "low" -> new Color(0x1565C0);
+                        default -> Color.GRAY;
+                    };
+                }
+                comp.setForeground(colour);
+            }
+            setFont(getFont().deriveFont(gone ? Font.ITALIC : Font.PLAIN));
             return comp;
         }
     }

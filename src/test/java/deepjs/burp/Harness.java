@@ -65,6 +65,11 @@ public final class Harness {
         analyzer.submit("script", base + "/static/js/main.js", main.getBytes(StandardCharsets.UTF_8));
         analyzer.submit("script", base + "/static/js/junk.js", new byte[]{0, 1, 2, '{', '{', '{'});
         check(analyzer.awaitIdle(30_000), "everything submitted is analysed");
+        check(messages.stream().anyMatch(f -> f[0].equals("E") && f[3].equals("/api/v1/auth/login") && f.length == 14
+                        && f[12].equals("fetch") && main.contains(f[11] + f[12] + f[13]) && f[13].startsWith("(API+\"/auth/login\"")),
+                "an endpoint comes with the code it was read from");
+        check(messages.stream().anyMatch(f -> f[0].equals("S") && f.length == 13 && f[11].equals(f[3])
+                        && main.contains(f[10] + f[11] + f[12])), "a secret comes with the code around its value");
         System.out.println("DeepJS " + DeepJsExtension.VERSION + " (engine in process, first three files in "
                 + (System.nanoTime() - began) / 1_000_000 + " ms)");
 
@@ -145,6 +150,7 @@ public final class Harness {
 
         // ── the tab and its models (no Burp, no display) ─────────────────────
         List<List<String[]>> toRepeater = new ArrayList<>();
+        int[] dismissals = {0};
         DeepJsTab[] holder = new DeepJsTab[1];
         SwingUtilities.invokeAndWait(() -> holder[0] = new DeepJsTab(new DeepJsTab.Actions() {
             public void sendToRepeater(List<String[]> rows) { toRepeater.add(rows); }
@@ -152,6 +158,7 @@ public final class Harness {
             public void analyseProxyHistory() { }
             public void clearAll() { }
             public void settingsChanged() { }
+            public void dismissalsChanged() { dismissals[0]++; }
             public void openReleasePage() { }
         }));
         DeepJsTab tab = holder[0];
@@ -172,8 +179,71 @@ public final class Harness {
         check(!offeredTooEarly && tab.updateButton.isVisible() && tab.updateButton.getText().equals("Get DeepJS 9.9.9"),
                 "the download button appears only when there is something to download");
         check(tab.endpoints.getRowCount() == 2, "endpoint rows are keyed (2 rows, got " + tab.endpoints.getRowCount() + ")");
+
+        // what is listed: calls only until strings are asked for, one host, not yet requested
+        tab.putEndpoint("GET /v2/x", new String[]{"GET", "https://api.other.io/v2/x", "", "", "", "fetch", "m.js:1", "no",
+                "return ", "fetch", "(\"/v2/x\")\r\n"});
+        int[] seen = new int[6];
+        String[] shown = new String[3];
+        SwingUtilities.invokeAndWait(() -> {
+            seen[0] = tab.endpointTable.getRowCount();                          // the bare string "/other" is not listed
+            tab.showStrings.doClick();
+            seen[1] = tab.endpointTable.getRowCount();
+            tab.hostFilter.setSelectedItem("api.other.io");
+            seen[2] = tab.endpointTable.getRowCount();
+            tab.endpointTable.setRowSelectionInterval(0, 0);
+            shown[0] = tab.endpointCode.text();
+            shown[1] = tab.endpointCode.highlighted();
+            tab.onlyUnrequested.doClick();
+            seen[3] = tab.endpointTable.getRowCount();
+        });
+        tab.markRequested(List.of("GET /v2/x", "no such row"));
+        SwingUtilities.invokeAndWait(() -> {
+            seen[4] = tab.endpointTable.getRowCount();
+            shown[2] = String.valueOf(tab.endpoints.getValueAt(2, DeepJsTab.E_SEEN));
+            tab.onlyUnrequested.doClick();
+            tab.hostFilter.setSelectedItem(DeepJsTab.ALL_HOSTS);
+            seen[5] = tab.endpointTable.getRowCount();
+        });
+        check(seen[0] == 2 && seen[1] == 3, "string-only paths are listed when asked for: " + seen[0] + " → " + seen[1]);
+        check(tab.hostFilter.getItemCount() == 3 && tab.hostFilter.getItemAt(1).equals("api.other.io")
+                && tab.hostFilter.getItemAt(2).equals("app.acme.io") && seen[2] == 1, "the calls can be narrowed to one host");
+        check(shown[0].equals("return fetch(\"/v2/x\")\n") && shown[1].equals("fetch"),
+                "selecting a call shows its code, the call highlighted: " + shown[0] + " / " + shown[1]);
+        check(seen[3] == 1 && seen[4] == 0 && shown[2].equals("yes") && seen[5] == 3,
+                "a call disappears from \"not requested yet\" once it is requested: " + java.util.Arrays.toString(seen) + " " + shown[2]);
+
+        // "Mask values": no value of the Secrets table is readable in a code view, whole or cut
+        String value = "Zx9Qm2Lk8Pz4Rt6Vw1Yb5Nc7Hf0Jg3Ua";
+        StringBuilder excerpt = new StringBuilder("key=\"" + value + "\"; again=\"" + value.substring(0, 20));
+        int[] mark = CodeView.conceal(excerpt, 5, 5 + value.length(), List.of(value));
+        check(excerpt.toString().equals("key=\"Zx9Qm2Lk…g3Ua\"; again=\"Zx…") && excerpt.substring(mark[0], mark[1]).equals("Zx9Qm2Lk…g3Ua"),
+                "a concealed value is masked wherever the excerpt shows it: " + excerpt);
+        excerpt = new StringBuilder(value.substring(12) + "\" }; fetch(u)");
+        mark = CodeView.conceal(excerpt, 25, 30, List.of(value));
+        check(excerpt.toString().equals("…\" }; fetch(u)") && excerpt.substring(mark[0], mark[1]).equals("fetch"),
+                "…also where the excerpt begins inside it: " + excerpt);
+        check(CodeView.printable("a\r\nb\u0000c\td").equals("a\nb·c\td"), "source is made printable");
         check(tab.scripts.getRowCount() == 1 && tab.scripts.getValueAt(0, 2).equals("fetched (12 KB)"), "script status updates in place");
         check(tab.secrets.getRowCount() == 1 && tab.hosts.getRowCount() == 1, "secrets and hosts tables fill");
+
+        // "Not a secret": gone from the list, remembered, and reversible
+        int[] listed = new int[4];
+        SwingUtilities.invokeAndWait(() -> {
+            tab.secretTable.setRowSelectionInterval(0, 0);
+            ((javax.swing.JMenuItem) tab.secretTable.getComponentPopupMenu().getComponent(1)).doClick();
+            listed[0] = tab.secretTable.getRowCount();
+            tab.showDismissed.doClick();
+            listed[1] = tab.secretTable.getRowCount();
+            tab.secretTable.setRowSelectionInterval(0, 0);
+            listed[2] = tab.isDismissed("AWS x") ? 1 : 0;
+            ((javax.swing.JMenuItem) tab.secretTable.getComponentPopupMenu().getComponent(2)).doClick();
+            tab.showDismissed.doClick();
+            listed[3] = tab.secretTable.getRowCount();
+        });
+        check(listed[0] == 0 && listed[1] == 1 && listed[2] == 1 && tab.secrets.getRowCount() == 1,
+                "a dismissed secret leaves the list and can be shown again");
+        check(listed[3] == 1 && !tab.isDismissed("AWS x") && dismissals[0] == 2, "and brought back; each change is reported to be saved");
         SwingUtilities.invokeAndWait(tab::clearTables);
         SwingUtilities.invokeAndWait(() -> { });
         check(tab.endpoints.getRowCount() == 0, "clear empties the tables");
@@ -184,6 +254,35 @@ public final class Harness {
         check("{\"role\": \"\", \"reason\": \"\"}".equals(DeepJsExtension.requestBody(row)), "body fields become JSON");
         check(DeepJsExtension.requestUrl(new String[]{"GET", "{base}/users", "", "", "", "fetch", ""}) == null,
                 "an endpoint with no known host is not sent");
+
+        // ── what Burp has requested, and the session it was requested with ───
+        Traffic traffic = new Traffic();
+        String roles = base + "/api/users/{id}/roles";
+        check(!traffic.watch("roles", "GET", roles, false) && traffic.saw("POST", base + "/api/users/42/roles").isEmpty(),
+                "a request with another method is another request");
+        check(traffic.saw("GET", "HTTPS://App.Acme.io:443/api/users/42/roles/?x=1#top").equals(List.of("roles")),
+                "a request to a path the endpoint's URL matches is its first request");
+        check(traffic.saw("GET", base + "/api/users/42/roles").isEmpty() && traffic.watch("roles", "GET", roles, false), "…and is counted once");
+        check(traffic.watch("literal", "", base + "/api/users/42/roles", false) && !traffic.watch("delete", "DELETE", roles, false)
+                && !traffic.watch("shorter", "GET", base + "/api/users/{id}", false), "method and depth both have to match");
+        check(!traffic.watch("elsewhere", "GET", "https://api.acme.io/api/users/{id}/roles", false)
+                && traffic.watch("guessed", "GET", "https://guess.example/api/users/{id}/roles", true),
+                "another host is another API, unless the host was only a guess");
+        traffic.forget("delete");
+        check(traffic.saw("DELETE", base + "/api/users/9/roles").isEmpty() && !traffic.watch("nowhere", "GET", "{base}/users", false)
+                && Traffic.hostOf("{base}/users").isEmpty() && Traffic.hostOf("http://localhost:3000/").equals("localhost:3000"),
+                "a withdrawn endpoint is no longer followed; one without a host cannot be");
+        check(traffic.paths() == 2, "one path per host is one entry, whatever the methods: " + traffic.paths());
+
+        Sessions sessions = new Sessions();
+        sessions.note("app.acme.io", "Cookie", "sid=1");
+        sessions.note("app.acme.io", "Accept", "*/*");
+        sessions.note("app.acme.io", "X-CSRF-Token", "t1");
+        sessions.note("app.acme.io", "cookie", "sid=2");                          // a later request: the newer value
+        StringBuilder kept = new StringBuilder();
+        sessions.headersFor("app.acme.io").forEach(h -> kept.append(h[0]).append('=').append(h[1]).append(' '));
+        check(kept.toString().equals("cookie=sid=2 X-CSRF-Token=t1 ") && sessions.headersFor("api.acme.io").isEmpty(),
+                "session headers are kept per host, the latest value of each: " + kept);
 
         extensionAgainstMockedBurp();
 
@@ -295,13 +394,68 @@ public final class Harness {
         check(fake.siteMapAdds.stream().anyMatch(o -> String.valueOf(o).contains("AuditIssue")), "an issue is raised for the secret");
 
         // 4. Repeater skeleton
+        int loginRow = -1, adminRow = -1;
         for (int r = 0; r < ext.tab.endpoints.getRowCount(); r++) {
-            if (ext.tab.endpoints.getValueAt(r, DeepJsTab.E_URL).equals(base + "/api/v1/auth/login")) {
-                ext.sendToRepeater(java.util.Collections.singletonList(ext.tab.endpoints.row(r)));
-            }
+            Object url = ext.tab.endpoints.getValueAt(r, DeepJsTab.E_URL);
+            loginRow = url.equals(base + "/api/v1/auth/login") ? r : loginRow;
+            adminRow = url.equals(base + "/api/v1/admin/users/{param}") ? r : adminRow;
         }
+        final int login = loginRow, admin = adminRow;
+        ext.sendToRepeater(java.util.Collections.singletonList(ext.tab.endpoints.row(login)));
         check(fake.repeater.size() == 1 && fake.repeater.get(0).startsWith("POST " + base + "/api/v1/auth/login")
                 && fake.repeater.get(0).contains("\"email\": \"\""), "Repeater receives a POST with the body fields: " + fake.repeater);
+        check(!fake.repeater.get(0).contains("Cookie"), "with no session seen for the host, none is invented");
+
+        // 4a. the code a call was read from
+        String[] code = new String[2];
+        SwingUtilities.invokeAndWait(() -> {
+            int viewRow = ext.tab.endpointTable.convertRowIndexToView(login);
+            ext.tab.endpointTable.setRowSelectionInterval(viewRow, viewRow);
+            code[0] = ext.tab.endpointCode.text();
+            code[1] = ext.tab.endpointCode.highlighted();
+        });
+        check(code[1].equals("fetch") && code[0].contains("function login(e,t){return fetch(\"/api/v1/auth/login\",{method:\"POST\""),
+                "a call is shown in its code: " + code[0]);
+
+        // 4b. which calls Burp has made: the browser logs in, someone tries the admin call from Repeater
+        check(ext.tab.endpoints.getValueAt(login, DeepJsTab.E_SEEN).equals("no") && ext.tab.endpoints.getValueAt(admin, DeepJsTab.E_SEEN).equals("no"),
+                "nothing has been requested yet");
+        ext.handleHttpRequestToBeSent(fake.sent("GET", base + "/api/v1/auth/login", true));
+        ext.handleHttpRequestToBeSent(fake.sent("POST", base + "/api/v1/auth/login?next=%2F", true,
+                "Cookie", "sid=abc123", "Authorization", "Bearer tok-1", "Accept", "*/*", "X-CSRF-Token", "c5"));
+        ext.handleHttpRequestToBeSent(fake.sent("DELETE", "https://app.acme.io:443/api/v1/admin/users/17", false, "Cookie", "sid=from-repeater"));
+        SwingUtilities.invokeAndWait(() -> { });
+        check(ext.tab.endpoints.getValueAt(login, DeepJsTab.E_SEEN).equals("yes"), "a request with the call's method and path marks it requested");
+        check(ext.tab.endpoints.getValueAt(admin, DeepJsTab.E_SEEN).equals("yes"), "/users/17 is a request for /users/{param}");
+        check(column(ext.tab.endpoints, DeepJsTab.E_SEEN).contains("no"), "what nobody has requested stays marked");
+
+        // 4c. the session the browser used is offered to Repeater, for that host only and only if wanted
+        ext.sendToRepeater(java.util.Collections.singletonList(ext.tab.endpoints.row(login)));
+        String borrowed = fake.repeater.get(1);
+        check(borrowed.contains("Cookie: sid=abc123") && borrowed.contains("Authorization: Bearer tok-1") && borrowed.contains("X-CSRF-Token: c5")
+                && !borrowed.contains("Accept") && !borrowed.contains("from-repeater"), "Repeater gets the session the browser used: " + borrowed);
+        String[] elsewhere = ext.tab.endpoints.row(login).clone();
+        elsewhere[DeepJsTab.E_URL] = "https://api.other.io/api/v1/auth/login";
+        ext.sendToRepeater(java.util.Collections.singletonList(elsewhere));
+        check(!fake.repeater.get(2).contains("sid="), "a session is never sent to another host: " + fake.repeater.get(2));
+        SwingUtilities.invokeAndWait(ext.tab.withSession::doClick);
+        ext.sendToRepeater(java.util.Collections.singletonList(ext.tab.endpoints.row(login)));
+        check(!fake.repeater.get(3).contains("sid="), "nor at all once the option is off");
+        SwingUtilities.invokeAndWait(ext.tab.withSession::doClick);
+        fake.repeater.subList(1, fake.repeater.size()).clear();
+
+        // 4d. "Not a secret" is remembered — as a fingerprint, not as the value
+        SwingUtilities.invokeAndWait(() -> {
+            for (int r = 0; r < ext.tab.secretTable.getRowCount(); r++) {
+                if (ext.tab.secretTable.getValueAt(r, 1).equals("HARDCODED_SECRET")) {
+                    ext.tab.secretTable.setRowSelectionInterval(r, r);
+                }
+            }
+            ((javax.swing.JMenuItem) ext.tab.secretTable.getComponentPopupMenu().getComponent(1)).doClick();
+        });
+        String remembered = String.valueOf(fake.savedStrings.get("deepjs.dismissed"));
+        check(remembered.startsWith("HARDCODED_SECRET ") && !remembered.contains(found),
+                "the choice is saved without the value: " + remembered);
 
         // 5. proxy history + context menu + clear
         fake.history.add(fake.pair(base + "/static/js/extra.js", "fetch(\"/api/v1/from-history\")", burp.api.montoya.http.message.MimeType.SCRIPT));
@@ -375,6 +529,32 @@ public final class Harness {
             check(said[0].contains("The page is " + DeepJsExtension.RELEASES_PAGE), "without a desktop the address goes to the log: " + said[0]);
         }
         store.unloadHandler.extensionUnloaded();
+
+        // another Burp session, the same preferences: what was ruled out is neither listed nor raised again
+        MockBurp later = new MockBurp();
+        later.savedStrings.putAll(fake.savedStrings);
+        later.savedBooleans.put("deepjs.Show string-only paths", true);
+        DeepJsExtension again = new DeepJsExtension();
+        again.browser = opened::add;
+        again.initialize(later.api());
+        SwingUtilities.invokeAndWait(() -> {
+            again.tab.fetchHidden.setSelected(false);
+            again.tab.fetchMaps.setSelected(false);
+        });
+        again.handleHttpResponseReceived(later.proxied(base + "/static/js/main.js", main + "var help=\"/api/v1/only-a-string\";",
+                burp.api.montoya.http.message.MimeType.SCRIPT));
+        settle(again, later, 0);
+        int[] rows = new int[2];
+        SwingUtilities.invokeAndWait(() -> {
+            rows[0] = again.tab.secretTable.getRowCount();
+            rows[1] = again.tab.endpointTable.getRowCount();
+        });
+        check(again.tab.showStrings.isSelected() && column(again.tab.endpoints, DeepJsTab.E_KIND).contains("string")
+                && rows[1] == again.tab.endpoints.getRowCount(), "a saved option is in force from the start: " + rows[1] + " call(s) listed");
+        check(column(again.tab.secrets, 1).contains("HARDCODED_SECRET") && rows[0] == again.tab.secrets.getRowCount() - 1
+                        && later.siteMapAdds.stream().noneMatch(o -> String.valueOf(o).contains("AuditIssue")),
+                "a value ruled out once stays out: " + rows[0] + " of " + again.tab.secrets.getRowCount() + " listed");
+        later.unloadHandler.extensionUnloaded();
         System.out.println("extension against mocked Burp: ok (" + fake.requested.size() + " request(s) made through Burp)");
     }
 }

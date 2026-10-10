@@ -18,7 +18,12 @@ body field names and header names.</p>
 		such instead of being reported as leaks, and so are tokens a page carries for its current visitor. Values are shown
 		as found and can be masked for screenshots.</li>
 	<li>Hosts, client-side routes, GraphQL operation names and npm package names found in the code.</li>
-	<li>Send to Repeater builds a request skeleton from a finding: method, query names, a JSON body with the field names.</li>
+	<li>Requested or not: each call is set against the requests Burp has made, so the calls nobody has made yet — the
+		part of the API the application's pages did not show — can be listed on their own.</li>
+	<li>Every call and every secret is shown in the code it was read from, the finding highlighted.</li>
+	<li>Send to Repeater builds a request from a finding: method, query names, a JSON body with the field names and,
+		optionally, the session headers the browser last sent to that host.</li>
+	<li>A value marked "Not a secret" is hidden and remembered by fingerprint, so it is not reported again.</li>
 	<li>Analyse proxy history, and an "Analyse with DeepJS" context-menu item.</li>
 </ul>
 
@@ -26,8 +31,9 @@ body field names and header names.</p>
 <ol>
 	<li>Browse the target through Burp. Findings appear in the DeepJS tab as responses arrive.</li>
 	<li>Open "Hidden scripts" to see what the code refers to that has not been loaded; "Fetch now" requests it.</li>
-	<li>Select rows under "API calls" and choose "Send to Repeater".</li>
+	<li>Under "API calls", tick "Only not requested yet", select a row to read its code, and choose "Send to Repeater".</li>
 </ol>
 
 <p>The extension has no dependencies. Analysis runs on its own thread and makes no network requests of its own: hidden
-scripts and source maps are requested through Burp, and only when those options are enabled.</p>
+scripts and source maps are requested through Burp, and only when those options are enabled. Session headers are kept
+in memory only and are added only to Repeater requests for the host they were sent to.</p>

@@ -40,6 +40,7 @@ final class Endpoints {
         String file = "";
         int line;
         double confidence = 0.5;
+        String[] excerpt = Lexer.NO_EXCERPT;    // the code at file:line
 
         boolean isCall() {
             return !kind.equals("string");
@@ -400,6 +401,7 @@ final class Endpoints {
                 }
             }
             if (old == null) {
+                ep.excerpt = p.lex.tokenExcerpt(token);
                 byKey.put(ep.key(), ep);
                 out.endpoints.add(ep);
             } else {                                        // the same request again: merge what was learned

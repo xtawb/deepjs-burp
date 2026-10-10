@@ -26,6 +26,9 @@ final class Lexer {
     }
 
     private static final int MAX_REGEX_LEN = 4000;
+    /** The code a finding was read from: what stands before the span, the span, what follows. */
+    static final String[] NO_EXCERPT = {"", "", ""};
+    private static final int EXCERPT_BEFORE = 160, EXCERPT_SPAN = 240, EXCERPT_AFTER = 240;     // in characters
     /** `${`${…}`}` deeper than this is skipped, not followed. */
     private static final int MAX_TEMPLATE_DEPTH = 40;
 
@@ -73,6 +76,33 @@ final class Lexer {
 
     int tokenLine(int index) {
         return index >= 0 && index < n ? lineOf(start[index]) : 0;
+    }
+
+    /** The source around [from, to), so that a finding can be shown in its code. */
+    String[] excerpt(int from, int to) {
+        from = Math.max(0, Math.min(from, src.length()));
+        to = Math.max(from, Math.min(Math.min(to, src.length()), forward(from, EXCERPT_SPAN)));
+        return new String[]{src.substring(backward(from, EXCERPT_BEFORE), from), src.substring(from, to),
+                src.substring(to, forward(to, EXCERPT_AFTER))};
+    }
+
+    String[] tokenExcerpt(int index) {
+        return index >= 0 && index < n ? excerpt(start[index], end[index]) : NO_EXCERPT;
+    }
+
+    // the Python engine measures an excerpt in characters, and a Java index counts UTF-16 units
+    private int forward(int at, int characters) {
+        while (characters-- > 0 && at < src.length()) {
+            at += Character.charCount(src.codePointAt(at));
+        }
+        return at;
+    }
+
+    private int backward(int at, int characters) {
+        while (characters-- > 0 && at > 0) {
+            at -= Character.charCount(src.codePointBefore(at));
+        }
+        return at;
     }
 
     // ── tokenizing ───────────────────────────────────────────────────────────
