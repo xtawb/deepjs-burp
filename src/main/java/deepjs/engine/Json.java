@@ -6,16 +6,17 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * A JSON reader for the two documents the engine has to open: source maps and
- * the header / payload of a JWT. Objects become {@code Map<String, Object>},
- * arrays {@code List<Object>}, numbers {@code Long} or {@code Double}.
+ * A JSON reader for the documents that have to be opened: source maps, the
+ * header / payload of a JWT and, in the extension, GitHub's description of a
+ * release. Objects become {@code Map<String, Object>}, arrays
+ * {@code List<Object>}, numbers {@code Long} or {@code Double}.
  *
  * Input is untrusted: nesting depth is bounded and every error is the same
  * checked {@link Malformed}, never a stack overflow or an index error.
  */
-final class Json {
+public final class Json {
 
-    static final class Malformed extends Exception {
+    public static final class Malformed extends Exception {
         private static final long serialVersionUID = 1L;
 
         Malformed(String message) {
@@ -32,7 +33,7 @@ final class Json {
         this.s = s;
     }
 
-    static Object parse(String text) throws Malformed {
+    public static Object parse(String text) throws Malformed {
         Json reader = new Json(text);
         reader.blank();
         Object value = reader.value(0);
@@ -45,7 +46,7 @@ final class Json {
 
     /** `value` as an object, or null when it is anything else. */
     @SuppressWarnings("unchecked")
-    static Map<String, Object> object(Object value) {
+    public static Map<String, Object> object(Object value) {
         return value instanceof Map ? (Map<String, Object>) value : null;
     }
 

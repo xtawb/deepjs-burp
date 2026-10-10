@@ -53,6 +53,8 @@ final class DeepJsTab extends JPanel {
         void clearAll();
 
         void settingsChanged();
+
+        void openReleasePage();
     }
 
     /** A table whose rows are keyed, so a row can be updated in place when the engine learns more. */
@@ -134,6 +136,7 @@ final class DeepJsTab extends JPanel {
     final JCheckBox raiseIssues = new JCheckBox("Report secrets as issues", true);
     final JCheckBox showStrings = new JCheckBox("Show string-only paths", true);
     final JCheckBox updateCheck = new JCheckBox("Check for updates when Burp starts", true);
+    final JButton updateButton = new JButton("Open download page");
     final JCheckBox maskValues = new JCheckBox("Mask values", false);
 
     private final JLabel status = new JLabel("starting…");
@@ -306,6 +309,10 @@ final class DeepJsTab extends JPanel {
         top.add(updateCheck);
         updateCheck.setToolTipText("One request to api.github.com, sent through Burp, to see whether a newer DeepJS has been released");
         updateCheck.addActionListener(e -> actions.settingsChanged());
+        updateButton.setToolTipText("Opens the release page in your browser. DeepJS downloads and replaces nothing itself.");
+        updateButton.addActionListener(e -> actions.openReleasePage());
+        updateButton.setVisible(false);                 // until a newer release is known
+        top.add(updateButton);
         JPanel p = textPanel(log);
         p.add(top, BorderLayout.NORTH);
         return p;
@@ -416,6 +423,22 @@ final class DeepJsTab extends JPanel {
                 log.setText("");
             }
             log.append(line + "\n");
+        });
+    }
+
+    /** A newer release exists: offer the page it is downloaded from. */
+    void offerUpdate(String version) {
+        onEdt(() -> {
+            updateButton.setText("Get DeepJS " + version);
+            updateButton.setVisible(true);
+        });
+    }
+
+    /** Installed from the BApp Store: Burp updates the extension, so there is nothing for it to check. */
+    void updatesComeFromTheStore() {
+        onEdt(() -> {
+            updateCheck.setEnabled(false);
+            updateCheck.setToolTipText("Installed from the BApp Store: Burp keeps this extension up to date");
         });
     }
 

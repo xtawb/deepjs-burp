@@ -19,8 +19,11 @@ import burp.api.montoya.scanner.audit.issues.AuditIssueConfidence;
 import burp.api.montoya.scanner.audit.issues.AuditIssueSeverity;
 import burp.api.montoya.ui.contextmenu.ContextMenuEvent;
 import burp.api.montoya.ui.contextmenu.ContextMenuItemsProvider;
+import deepjs.engine.Json;
 import deepjs.engine.Serve;
 import java.awt.Component;
+import java.awt.Desktop;
+import java.io.IOException;
 import java.net.URI;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -34,7 +37,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.regex.Matcher;
+import java.util.function.Consumer;
 import java.util.regex.Pattern;
 import javax.swing.JMenuItem;
 import javax.swing.Timer;
@@ -60,9 +63,10 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
     private static final int MAX_BODY = 20 * 1024 * 1024;
     private static final int MAX_FETCHES = 400;                 // per "Clear" — a ceiling on extension-made requests
     static final String RELEASES_API = "https://api.github.com/repos/xtawb/deepjs-burp/releases/latest";
-    private static final String RELEASES_PAGE = "https://github.com/xtawb/deepjs-burp/releases/latest";
+    static final String RELEASES_PAGE = "https://github.com/xtawb/deepjs-burp/releases/latest";
     private static final int MAX_QUEUED = 32;                   // responses waiting for analysis during a history pass
-    private static final Pattern TAG_NAME = Pattern.compile("\"tag_name\"\\s*:\\s*\"v?([0-9]+(?:\\.[0-9]+)*)\"");
+    private static final int MAX_NOTES_LINES = 40;
+    private static final Pattern VERSION_SHAPE = Pattern.compile("\\d{1,9}(\\.\\d{1,9}){0,5}");
 
     private MontoyaApi api;
     private Preferences prefs;
@@ -79,6 +83,7 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
     private final AtomicInteger fetchCount = new AtomicInteger();
     private final AtomicInteger analysedCount = new AtomicInteger();
     private volatile String notice = "";              // shown in the status line: "update available: 0.5.0"
+    Consumer<String> browser = this::openInBrowser;   // the harness has no desktop to open a page on
 
     // ── BurpExtension ────────────────────────────────────────────────────────
 
@@ -104,7 +109,9 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
 
         statusTimer = new Timer(1000, e -> refreshStatus());
         statusTimer.start();
-        if (tab.updateCheck.isSelected()) {
+        if (api.extension().isBapp()) {
+            tab.updatesComeFromTheStore();
+        } else if (tab.updateCheck.isSelected()) {
             background("deepjs-update", this::checkForUpdate);
         }
         api.logging().logToOutput("DeepJS " + VERSION + " loaded.");
@@ -291,7 +298,13 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
 
     // ── update notice ────────────────────────────────────────────────────────
 
-    /** One request to GitHub's API, through Burp, when the extension loads. Silent when offline. */
+    /**
+     * One request to GitHub's API, through Burp, when the extension loads. Silent when offline.
+     *
+     * A newer release is announced, with what it changed, and the tab offers its download page.
+     * That is as far as this goes: an extension cannot replace the jar Burp has loaded it from,
+     * and a build installed from the BApp Store is updated by Burp, which is why it never asks.
+     */
     private void checkForUpdate() {
         HttpRequest request = HttpRequest.httpRequestFromUrl(RELEASES_API)
                 .withAddedHeader("Accept", "application/vnd.github+json")
@@ -300,24 +313,86 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
         if (response == null || response.statusCode() != 200) {
             return;
         }
-        String latest = latestTag(response.bodyToString());
-        if (isNewer(latest, VERSION)) {
-            notice = "update available: " + latest;
-            String message = "DeepJS " + latest + " is available (this is " + VERSION + "): " + RELEASES_PAGE;
-            tab.log(message);
-            api.logging().logToOutput(message);
-            refreshStatus();
+        Release latest = Release.read(response.bodyToString());
+        if (!isNewer(latest.version(), VERSION)) {
+            return;
+        }
+        notice = "update available: " + latest.version();
+        String headline = "DeepJS " + latest.version() + " is available (this is " + VERSION + "): " + RELEASES_PAGE;
+        StringBuilder text = new StringBuilder(headline);
+        if (!latest.notes().isEmpty()) {
+            text.append("\nWhat changed:");
+            for (String line : latest.notes()) {
+                text.append("\n  ").append(line);
+            }
+        }
+        text.append("\nTo update: download deepjs-burp.jar from that page, then under Extensions > Installed"
+                + " remove DeepJS and add the new file.");
+        tab.log(text.toString());
+        tab.offerUpdate(latest.version());
+        api.logging().logToOutput(headline);
+        refreshStatus();
+    }
+
+    /** The latest release as GitHub describes it: its version ("" when the tag is not one) and its notes, by line. */
+    record Release(String version, List<String> notes) {
+
+        static Release read(String json) {
+            try {
+                Map<String, Object> doc = Json.object(Json.parse(json == null ? "" : json));
+                if (doc != null && doc.get("tag_name") instanceof String tag) {
+                    String version = tag.startsWith("v") ? tag.substring(1) : tag;
+                    String notes = doc.get("body") instanceof String body ? body : "";
+                    return new Release(VERSION_SHAPE.matcher(version).matches() ? version : "", readable(notes));
+                }
+            } catch (Json.Malformed e) {
+                // an error page, a captive portal, a rate-limit message: not a release
+            }
+            return new Release("", List.of());
         }
     }
 
-    static String latestTag(String releaseJson) {
-        Matcher m = TAG_NAME.matcher(releaseJson == null ? "" : releaseJson);
-        return m.find() ? m.group(1) : "";
+    /** Release notes as lines fit for the log: no control characters, a bounded number of bounded lines. */
+    static List<String> readable(String notes) {
+        List<String> lines = new ArrayList<>();
+        for (String raw : notes.split("\r\n|\r|\n", -1)) {
+            StringBuilder line = new StringBuilder();
+            for (int i = 0; i < raw.length() && line.length() < 300; i++) {
+                char c = raw.charAt(i);
+                if (c == '\t' || !Character.isISOControl(c)) {
+                    line.append(c);
+                }
+            }
+            lines.add(line.toString());
+        }
+        while (!lines.isEmpty() && lines.get(lines.size() - 1).isBlank()) {
+            lines.remove(lines.size() - 1);
+        }
+        if (lines.size() > MAX_NOTES_LINES) {
+            lines = new ArrayList<>(lines.subList(0, MAX_NOTES_LINES));
+            lines.add("…");
+        }
+        return lines;
+    }
+
+    @Override
+    public void openReleasePage() {
+        background("deepjs-browser", () -> browser.accept(RELEASES_PAGE));
+    }
+
+    /** Hand a page to the desktop's browser; where there is none to hand it to, the address goes to the log. */
+    private void openInBrowser(String url) {
+        try {
+            Desktop.getDesktop().browse(URI.create(url));
+        } catch (IOException | RuntimeException e) {
+            tab.log("No browser could be opened from here (" + e.getClass().getSimpleName() + "). The page is " + url);
+        }
     }
 
     /** Is version `candidate` ("0.10.1") later than `current`? Unparseable input is never newer. */
     static boolean isNewer(String candidate, String current) {
-        if (candidate == null || current == null || !candidate.matches("\\d+(\\.\\d+)*") || !current.matches("\\d+(\\.\\d+)*")) {
+        if (candidate == null || current == null
+                || !VERSION_SHAPE.matcher(candidate).matches() || !VERSION_SHAPE.matcher(current).matches()) {
             return false;
         }
         String[] a = candidate.split("\\."), b = current.split("\\.");

@@ -29,11 +29,20 @@ public final class Harness {
 
     public static void main(String[] args) throws Exception {
         // ── update notice ────────────────────────────────────────────────────
-        check(DeepJsExtension.latestTag("{\"url\":\"x\",\"tag_name\": \"v1.12.0\",\"name\":\"n\"}").equals("1.12.0"), "tag is read");
-        check(DeepJsExtension.latestTag("<html>rate limited</html>").isEmpty(), "no tag in an error page");
+        DeepJsExtension.Release release = DeepJsExtension.Release.read("{\"url\":\"x\",\"tag_name\": \"v1.12.0\",\"name\":\"n\","
+                + "\"body\":\"## Fixes\\r\\n- one\\u001b[2J\\u0007\\n- two\\n\\n\"}");
+        check(release.version().equals("1.12.0"), "tag is read");
+        check(release.notes().equals(List.of("## Fixes", "- one[2J", "- two")), "release notes are read, minus control characters: " + release.notes());
+        check(DeepJsExtension.Release.read("<html>rate limited</html>").version().isEmpty()
+                && DeepJsExtension.Release.read(null).version().isEmpty()
+                && DeepJsExtension.Release.read("{\"tag_name\":7}").version().isEmpty()
+                && DeepJsExtension.Release.read("{\"tag_name\":\"v1.0 beta\"}").version().isEmpty(), "what is not a release has no version");
+        List<String> cut = DeepJsExtension.readable("x".repeat(5000) + "\nline".repeat(500));
+        check(cut.size() == 41 && cut.get(0).length() == 300 && cut.get(40).equals("…"), "long release notes are cut");
         check(DeepJsExtension.isNewer("0.10.0", "0.9.9") && DeepJsExtension.isNewer("1.0", "0.99.99")
                 && !DeepJsExtension.isNewer("0.3.0", "0.3.0") && !DeepJsExtension.isNewer("0.2.9", "0.3.0")
-                && !DeepJsExtension.isNewer("", "0.3.0") && !DeepJsExtension.isNewer("nightly", "0.3.0"), "version comparison");
+                && !DeepJsExtension.isNewer("", "0.3.0") && !DeepJsExtension.isNewer("nightly", "0.3.0")
+                && !DeepJsExtension.isNewer("99999999999999999999999.0", "0.3.0"), "version comparison");
         check(DeepJsExtension.VERSION.matches("\\d+\\.\\d+\\.\\d+"), "the extension has a version: " + DeepJsExtension.VERSION);
 
         // ── the analysis thread and the engine behind it ─────────────────────
@@ -143,6 +152,7 @@ public final class Harness {
             public void analyseProxyHistory() { }
             public void clearAll() { }
             public void settingsChanged() { }
+            public void openReleasePage() { }
         }));
         DeepJsTab tab = holder[0];
         String[] row = {"POST", base + "/api/v1/users/{id}/roles", "expand,fields", "role,reason", "X-CSRF", "fetch", "main.js:1"};
@@ -156,7 +166,11 @@ public final class Harness {
         tab.putOther("Client routes", "/admin");
         tab.log("hello");
         tab.setStatus("ok", true);
+        boolean offeredTooEarly = tab.updateButton.isVisible();
+        tab.offerUpdate("9.9.9");
         SwingUtilities.invokeAndWait(() -> { });
+        check(!offeredTooEarly && tab.updateButton.isVisible() && tab.updateButton.getText().equals("Get DeepJS 9.9.9"),
+                "the download button appears only when there is something to download");
         check(tab.endpoints.getRowCount() == 2, "endpoint rows are keyed (2 rows, got " + tab.endpoints.getRowCount() + ")");
         check(tab.scripts.getRowCount() == 1 && tab.scripts.getValueAt(0, 2).equals("fetched (12 KB)"), "script status updates in place");
         check(tab.secrets.getRowCount() == 1 && tab.hosts.getRowCount() == 1, "secrets and hosts tables fill");
@@ -208,7 +222,8 @@ public final class Harness {
     private static void extensionAgainstMockedBurp() throws Exception {
         String base = "https://app.acme.io";
         MockBurp fake = new MockBurp();
-        fake.site.put(DeepJsExtension.RELEASES_API, "{\"tag_name\":\"v99.1.0\",\"name\":\"DeepJS 99.1.0\"}");
+        fake.site.put(DeepJsExtension.RELEASES_API, "{\"tag_name\":\"v99.1.0\",\"name\":\"DeepJS 99.1.0\","
+                + "\"body\":\"## Secrets\\r\\n- Fewer false positives.\\r\\n\"}");
         fake.site.put(base + "/static/js/admin.9f1c2a.chunk.js",
                 "function del(e){return fetch(\"/api/v1/admin/users/\"+e,{method:\"DELETE\"})}");
         fake.site.put(base + "/static/js/main.js.map",
@@ -216,6 +231,8 @@ public final class Harness {
                         + "\"sourcesContent\":[\"export const a = () => http.get(`/api/v1/audit/${id}`)\",\"x\"]}");
 
         DeepJsExtension ext = new DeepJsExtension();
+        List<String> opened = Collections.synchronizedList(new ArrayList<>());
+        ext.browser = opened::add;
         check(burp.api.montoya.BurpExtension.class.isAssignableFrom(DeepJsExtension.class), "implements BurpExtension");
         ext.initialize(fake.api());
         check(fake.suiteTab == ext.tab && fake.unloadHandler != null, "registers its tab and an unload handler");
@@ -225,6 +242,17 @@ public final class Harness {
         }
         check(fake.output.stream().anyMatch(line -> line.contains("DeepJS 99.1.0 is available")),
                 "a newer release is announced: " + fake.output);
+        String[] log = new String[1];
+        SwingUtilities.invokeAndWait(() -> log[0] = ext.tab.logText());
+        check(log[0].contains("What changed:\n  ## Secrets\n  - Fewer false positives.\n"), "with what it changed:\n" + log[0]);
+        check(fake.releaseChecks.size() == 1 && fake.requested.isEmpty(), "one request, to GitHub's API: " + fake.releaseChecks);
+        check(ext.tab.updateButton.isVisible() && opened.isEmpty(), "the download page is offered, not opened");
+        SwingUtilities.invokeAndWait(ext.tab.updateButton::doClick);
+        for (int i = 0; i < 50 && opened.isEmpty(); i++) {
+            Thread.sleep(100);
+        }
+        check(opened.equals(List.of(DeepJsExtension.RELEASES_PAGE)), "the button opens the release page: " + opened);
+        check(fake.releaseChecks.size() == 1 && fake.requested.isEmpty(), "and downloads nothing itself");
 
         // 1. the browser loads the runtime and the main bundle through the proxy
         String runtime = "(()=>{var r={};r.p=\"/\";r.u=e=>\"static/js/\"+({3:\"admin\"}[e]||e)+\".\"+"
@@ -326,6 +354,27 @@ public final class Harness {
 
         fake.unloadHandler.extensionUnloaded();
         check(!ext.analyzer.submit("script", base + "/late.js", new byte[]{'1'}), "unloading the extension stops the analysis thread");
+
+        // a copy installed from the BApp Store is updated by Burp: it has nothing to ask GitHub
+        MockBurp store = new MockBurp();
+        store.bapp = true;
+        store.site.put(DeepJsExtension.RELEASES_API, "{\"tag_name\":\"v99.1.0\"}");
+        DeepJsExtension fromStore = new DeepJsExtension();
+        fromStore.initialize(store.api());
+        Thread.sleep(500);
+        SwingUtilities.invokeAndWait(() -> { });
+        check(store.releaseChecks.isEmpty() && !fromStore.tab.updateCheck.isEnabled() && !fromStore.tab.updateButton.isVisible(),
+                "installed from the BApp Store: no update check");
+        if (java.awt.GraphicsEnvironment.isHeadless()) {        // with a desktop this would open a real browser
+            fromStore.openReleasePage();
+            String[] said = {""};
+            for (int i = 0; i < 50 && !said[0].contains("The page is " + DeepJsExtension.RELEASES_PAGE); i++) {
+                Thread.sleep(100);
+                SwingUtilities.invokeAndWait(() -> said[0] = fromStore.tab.logText());
+            }
+            check(said[0].contains("The page is " + DeepJsExtension.RELEASES_PAGE), "without a desktop the address goes to the log: " + said[0]);
+        }
+        store.unloadHandler.extensionUnloaded();
         System.out.println("extension against mocked Burp: ok (" + fake.requested.size() + " request(s) made through Burp)");
     }
 }

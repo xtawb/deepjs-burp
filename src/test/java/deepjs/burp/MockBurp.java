@@ -38,12 +38,14 @@ final class MockBurp {
     /** url → body the fake "site" serves when the extension requests something through Burp. */
     final Map<String, String> site = new HashMap<>();
     final List<String> requested = Collections.synchronizedList(new ArrayList<>());
+    final List<String> releaseChecks = Collections.synchronizedList(new ArrayList<>());
     final List<String> repeater = Collections.synchronizedList(new ArrayList<>());
     final List<String> output = Collections.synchronizedList(new ArrayList<>());
     final List<Object> siteMapAdds = Collections.synchronizedList(new ArrayList<>());
     final List<HttpRequestResponse> history = new ArrayList<>();
     volatile Component suiteTab;
     volatile ExtensionUnloadingHandler unloadHandler;
+    volatile boolean bapp;                  // "this copy was installed from the BApp Store"
     MockBurp() {
         ObjectFactoryLocator.FACTORY = mock(MontoyaObjectFactory.class, Map.of(
                 "httpRequestFromUrl", a -> request((String) a[0], "GET", new ArrayList<>())
@@ -159,9 +161,7 @@ final class MockBurp {
         Object http = mock(burp.api.montoya.http.Http.class, Map.of(
                 "sendRequest", a -> {
                     String url = ((HttpRequest) a[0]).url();
-                    if (!url.startsWith("https://api.github.com/")) {
-                        requested.add(url);                 // the update check is not a request to the target
-                    }
+                    (url.startsWith("https://api.github.com/") ? releaseChecks : requested).add(url);
                     String body = site.get(url);
                     HttpResponse resp = body == null ? response(404, "not found", MimeType.PLAIN_TEXT)
                             : response(200, body, url.endsWith(".map") ? MimeType.JSON : MimeType.SCRIPT);
@@ -177,6 +177,7 @@ final class MockBurp {
                 "registerSuiteTab", a -> { suiteTab = (Component) a[1]; return mock(burp.api.montoya.core.Registration.class, Map.of()); }
         ));
         Object extension = mock(burp.api.montoya.extension.Extension.class, Map.of(
+                "isBapp", a -> bapp,
                 "registerUnloadingHandler", a -> { unloadHandler = (ExtensionUnloadingHandler) a[0]; return mock(burp.api.montoya.core.Registration.class, Map.of()); }
         ));
         Object logging = mock(burp.api.montoya.logging.Logging.class, Map.of(

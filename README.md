@@ -56,9 +56,15 @@ browser, never more than 400 requests until *Clear* is pressed, and with
 a fully passive extension.
 
 When Burp starts, one request goes to GitHub's API, through Burp, to see
-whether a newer release exists; the answer is shown in the status line.
-*Check for updates when Burp starts* on the *Log / settings* tab turns it off.
-Without network access the check is silent.
+whether a newer release exists. If one does, the status line says so, the
+*Log / settings* tab lists what it changed, and a button there opens its
+download page in your browser. *Check for updates when Burp starts* turns the
+check off; without network access it is silent.
+
+That is deliberately all: the extension never downloads or installs a jar. An
+extension cannot replace the file Burp has loaded it from, and code that
+fetched and ran its own replacement would be code nobody had reviewed. A copy
+installed from the BApp Store does not check at all — Burp updates it.
 
 ## How it is verified
 
