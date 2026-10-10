@@ -162,6 +162,10 @@ def generated_inputs() -> List[Request]:
         "$.ajax({url:'/legacy/save.php',type:'post',data:{a:1,b:2}});$.getJSON('/legacy/list.json',{page:1});request({uri:base+'/v3/ping'});",
         "let s='it\\'s \\u0041\\x42\\u{1F600}\\ud83d\\ude00\\ud800 \\q\\0';let re=/[/\\]]+\\/\\d/gi.test(s)?a/b/c:x++ / y;",
     ]
+    # a syntax highlighter's grammar: `token` is a token type there
+    lines += ['var rules={start:[{token:"xml-pe.doctype.xml",regex:"(<!)(DOCTYPE)",next:"doctype"},'
+              '{token:"keyword.operator.attribute-equals.xml",regex:"="},{defaultToken:"text.tag-whitespace.xml"}]};',
+              f"var live={{token:{q(pick(alnum, 26))},authToken:{q(pick(url64, 30))}}};"]
     script = "\n".join(lines).encode("utf-8")
 
     page = (
@@ -170,6 +174,9 @@ def generated_inputs() -> List[Request]:
         "<script src=main.js></script><script src=\"//www.googletagmanager.com/gtm.js\"></script>"
         "<script src='https://cdn.generated.test/lib.js'></script><script type='text/template'><b>{{x}}</b></script>"
         "<script>window.__CFG__={apiUrl:'https://api.generated.test/v2',routes:['/a']};fetch('/api/boot?lang=en')</script></head><body>"
+        # tokens the server writes into the page for this visitor, next to a real secret
+        f"<script>boot({{ajaxpipe_token:{q(pick(alnum, 18))},token:{q(pick(url64, 24))},accessToken:{q(pick(alnum, 30))},"
+        f"clientSecret:{q(pick(alnum, 32))},apiKey:{q(pick(alnum, 28))}}})</script>"
         "<form action='search?q=1&amp;sort=asc#r'><input name=term><select name='cat'></select></form>"
         "<form method=post action='https://pay.generated.test/charge'><input name=\"card\"><textarea name=note></textarea>"
         "<button name='go'></button></form><form method='dialog'><input name=x></form><form action='javascript:void(0)'><input name=y></form>"
@@ -198,6 +205,7 @@ def generated_inputs() -> List[Request]:
         ("auto", base + "/static/empty.js", b""),
         ("auto", base + "/static/junk.js", bytes(range(256)) * 4 + b"\xff\xfe{{{`${`"),
         ("script", "https://www.google-analytics.com/analytics.js", b"fetch('/collect')"),
+        ("html", "https://www.instagram.com/someone/embed", page),      # a third-party embed is not the application
         ("map", base + "/static/not-a-map.js.map", b"<html>404</html>"),
     ]
 

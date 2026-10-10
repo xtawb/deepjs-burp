@@ -34,7 +34,7 @@ responses arrive.
 | | |
 |---|---|
 | **API calls** | Method, URL, query names, body fields, headers, where it was found. Filter, select rows, *Send to Repeater*: a request skeleton is built from the finding (`{id}` becomes `:id`, body fields become a JSON object). Paths that only appear as strings are listed too and can be hidden. |
-| **Secrets** | 35 credential formats, and credible values under secret-bearing names. Keys that are public by design — Stripe publishable keys, Firebase web configuration, Supabase anon keys, Algolia search keys — are labelled as such, not reported as leaks. Values are masked. Non-public findings are also raised as issues. |
+| **Secrets** | 35 credential formats, and credible values under secret-bearing names. Values are shown as found — you need them to check a finding — and *Mask values* hides the middle of each one for screenshots. Keys that are public by design (Stripe publishable keys, Firebase web configuration, Supabase anon keys, Algolia search keys) and tokens the server writes into a page for the current visitor are labelled as such, not reported as leaks; the rest are also raised as issues. |
 | **Hidden scripts** | Chunks and source maps the code names but no page has loaded. The chunk-name function of webpack, Next.js and Vite builds is evaluated, so the lazy parts of an application — the admin panel included — are listed without visiting them. |
 | **Hosts** | Every host the code mentions: in scope, cloud storage, internal, third party; non-production names flagged. |
 | **Routes · GraphQL · packages** | Client-side routes, GraphQL operation names, API base URLs, npm package names recovered from source maps. |
@@ -82,7 +82,11 @@ Without network access the check is silent.
   (26 MB of JavaScript, 2,247 records). CI runs the built-in sets on every push
   and once a week.
 
-What CI cannot do is load the jar into a real Burp instance.
+- **In Burp.** 0.4.0 was loaded and used in Burp Suite Community 2026.9.1. That
+  first real session reported four secrets and all four were false positives —
+  the token types of a syntax highlighter's grammar, and the page tokens of a
+  third-party embed. Both are fixed and are now tests; later versions have been
+  through the harness, which CI runs, but CI cannot load the jar into Burp.
 
 ## Compared with the JavaScript extensions in the BApp Store
 
@@ -131,7 +135,8 @@ stdin / stdout.
 - **Obfuscated bundles** (string-array rotation, control-flow flattening)
   defeat this kind of analysis.
 - Secrets are found by format and by name. A finding is a lead to check, not a
-  verified credential: nothing found is ever sent anywhere or tried.
+  verified credential: nothing found is ever sent anywhere or tried. Expect
+  some false positives, and report them — each one so far has become a test.
 
 ## License
 

@@ -211,6 +211,12 @@ final class Secrets {
     private static final Pattern AUTH_SCHEME = Py.rxi("^(?:Bearer|Token|Basic|ApiKey)\\s+");
     private static final Pattern FUNCTION_SIGNATURE = Py.rx("[A-Za-z_$][\\w$]*\\([\\w\\[\\], ]*\\)");
     private static final Pattern HEX32 = Py.rx("[0-9a-f]{32}");
+    private static final Set<String> GRAMMAR_SIBLINGS = Set.of("regex", "next", "push", "onMatch", "defaultToken",
+            "caseInsensitive", "nextState");
+    /** A name for something the server hands to this visitor: a session, CSRF or API token. */
+    private static final Pattern SESSION_KEY = Py.rx("(?:^|_)(?:token|jwt|bearer|auth|authorization|sid)(?:_|$)");
+    private static final Pattern NOT_SESSION_KEY = Py.rx(
+            "secret|pass(?:word|wd|phrase)?(?:_|$)|pwd|private|api_?key|client|signing|encrypt|master|license");
     private static final Pattern HEX = Py.rx("[0-9a-fA-F]+");
 
     static String normaliseKey(String key) {
@@ -359,6 +365,23 @@ final class Secrets {
         return false;
     }
 
+    /** {token: "keyword.operator", regex: /…/, next: "start"} — a syntax highlighter's rule, not a credential. */
+    private static boolean inGrammarRule(Program p, int i) {
+        for (int k = Math.max(0, i - 12), hi = Math.min(p.n, i + 12); k < hi; k++) {
+            if (p.kind[k] == ID && GRAMMAR_SIBLINGS.contains((String) p.value[k]) && p.isPunc(k + 1, ":")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static Secret pageToken(String value, String key, String file, int line) {
+        return new Secret("PAGE_TOKEN", "info", 0.6, value, key, file, line,
+                "'" + truncated(key, 60) + "' is set in the page itself — normally a per-visit value for the current user "
+                        + "(session, CSRF or API token), not a secret shipped to everyone. See what it grants before treating "
+                        + "it as a finding.", true);
+    }
+
     /** One token of three or more capitalised words that does not describe a form field. */
     private static boolean passphraseLike(String value) {
         if (!Py.matches(LETTERS_ONLY, value) || Py.found(SELF_DESCRIBING, value)) {
@@ -392,6 +415,7 @@ final class Secrets {
     static List<Secret> scan(Program p, String file, boolean entropy) {
         List<Secret> out = new ArrayList<>();
         Set<String> seen = new HashSet<>();
+        boolean inPage = file.contains("#inline-");
 
         for (int i = 0; i < p.n; i++) {
             String text;
@@ -444,6 +468,12 @@ final class Secrets {
             if (strength <= 0 && !entropy) {
                 continue;
             }
+            String name = normaliseKey(key);
+            if (Py.in(name, "token", "default_token") && inGrammarRule(p, i)) {
+                continue;
+            }
+            // an inline script of an HTML page: what is in it was written for this visitor
+            boolean visitor = inPage && Py.found(SESSION_KEY, name) && !Py.found(NOT_SESSION_KEY, name);
             String value = AUTH_SCHEME.matcher(Py.strip(text)).replaceFirst("");
             if (value.length() < 8 || value.length() > 512 || value.indexOf('\n') >= 0) {
                 continue;
@@ -475,11 +505,17 @@ final class Secrets {
                 if (label.equals("weak") && !Entropy.hasDigitOrSymbol(value)) {
                     continue;
                 }
+                if (visitor) {
+                    add(out, seen, pageToken(value, key, file, p.line(i)));
+                    continue;
+                }
                 double confidence = 0.45 + 0.4 * score;
                 add(out, seen, new Secret("HARDCODED_SECRET", confidence >= 0.72 ? "high" : "medium", Math.min(confidence, 0.92),
                         value, key, file, p.line(i), "Literal value assigned to '" + shownKey + "'.", false));
             } else if (strength == 1) {
-                if (label.equals("secret")) {
+                if (label.equals("secret") && visitor) {
+                    add(out, seen, pageToken(value, key, file, p.line(i)));
+                } else if (label.equals("secret")) {
                     add(out, seen, new Secret("HARDCODED_SECRET", "medium", 0.4 + 0.4 * score, value, key, file, p.line(i),
                             "Random-looking value assigned to '" + shownKey + "'.", false));
                 }

@@ -223,6 +223,8 @@ final class Entropy {
     };
     /** kebab / snake / dotted / event:name — benign only when it also reads like words. */
     private static final Pattern IDENTIFIERISH = Py.rx("^[A-Za-z][A-Za-z0-9]*(?:[-_.:/][A-Za-z0-9]+)+$");
+    /** Lower-case words joined by separators — a scope or token-type name (xml-pe.doctype.xml), whatever its letters. */
+    private static final Pattern SCOPE_NAME = Py.rx("^[a-z]+(?:[-_.:/][a-z]+)+$");
     private static final Pattern LONG_HEX = Py.rx("[0-9a-fA-F]{16,}");
     private static final Pattern DIGIT_OR_SYMBOL = Py.rx("[\\d!@#$%^&*+=/\\\\|~?]");
 
@@ -255,6 +257,9 @@ final class Entropy {
             }
         }
         if (words >= 0.45 && Py.startsWith(IDENTIFIERISH, v)) {
+            return new Verdict("benign", 0.06);
+        }
+        if (!strongKey && Py.startsWith(SCOPE_NAME, v)) {
             return new Verdict("benign", 0.06);
         }
         if (!hasDigitOrSymbol(v) && (!Py.isAscii(v) || words >= 0.45)) {

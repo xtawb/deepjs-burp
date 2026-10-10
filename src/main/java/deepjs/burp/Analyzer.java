@@ -71,7 +71,8 @@ final class Analyzer {
     private void analyse(long id, String kind, String url, byte[] body) {
         try {
             engine.feed(url, body, kind);
-            for (String[] record : engine.flush(false)) {
+            // values are handed over as found: the tab decides whether to mask them on screen
+            for (String[] record : engine.flush(true)) {
                 listener.onMessage(record);
             }
         } catch (RuntimeException | StackOverflowError e) {

@@ -26,9 +26,9 @@ import java.util.List;
 public final class Serve {
 
     /** The version of this extension. */
-    public static final String VERSION = "0.5.0";
+    public static final String VERSION = "0.5.1";
     /** The release of the Python package whose rules this engine implements, record for record. */
-    public static final String RULES = "0.4.0";
+    public static final String RULES = "0.4.1";
 
     private Serve() {
     }

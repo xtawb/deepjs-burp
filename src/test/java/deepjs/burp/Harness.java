@@ -109,6 +109,24 @@ public final class Harness {
         System.out.println("hostile input: 8 files in " + (System.nanoTime() - began) / 1_000_000 + " ms, "
                 + logged.size() + " rejected");
 
+        // ── reported from a real Burp session: four findings, none of them a secret ──
+        String grammar = "var rules={start:[{token:\"xml-pe.doctype.xml\",regex:\"(<!)(DOCTYPE)\",next:\"doctype\"}]};";
+        String visitorTokens = "<html><script>boot({ajaxpipe_token:\"AXk6Zr9Qm2Lk8Pz4GM\",token:\"AdTLUvdWw1Yb5Nc7uJZY\","
+                + "clientSecret:\"Zx9Qm2Lk8Pz4Rt6Vw1Yb5Nc7Hf0Jg3Ua\"})</script></html>";
+        marker = messages.size();
+        analyzer.submit("script", base + "/static/lib/ace/mode-xml.js", grammar.getBytes(StandardCharsets.UTF_8));
+        analyzer.submit("html", "https://www.instagram.com/shop/embed", visitorTokens.getBytes(StandardCharsets.UTF_8));
+        analyzer.submit("html", base + "/account", visitorTokens.getBytes(StandardCharsets.UTF_8));
+        check(analyzer.awaitIdle(30_000), "the reported cases are analysed");
+        List<String[]> secrets = messages.subList(marker, messages.size()).stream().filter(f -> f[0].equals("S")).toList();
+        check(secrets.stream().noneMatch(f -> f[5].contains("mode-xml") || f[5].contains("instagram")),
+                "a highlighter's token types and a third-party embed are not findings");
+        check(secrets.stream().filter(f -> f[2].equals("PAGE_TOKEN") && f[1].equals("info") && f[9].equals("1")).count() == 2,
+                "tokens written into the application's own page are labelled as the visitor's, not as leaks");
+        check(secrets.stream().anyMatch(f -> f[2].equals("HARDCODED_SECRET") && f[4].equals("clientSecret")
+                        && f[3].equals("Zx9Qm2Lk8Pz4Rt6Vw1Yb5Nc7Hf0Jg3Ua") && f[9].equals("0")),
+                "a client secret in the same page is still a finding, with its value");
+
         analyzer.reset();
         analyzer.submit("script", base + "/static/js/main.js", main.getBytes(StandardCharsets.UTF_8));
         check(analyzer.awaitIdle(30_000) && messages.stream().filter(f -> f[0].equals("E") && f[3].equals("/api/v1/auth/login")).count() == 2,
@@ -242,7 +260,10 @@ public final class Harness {
         // 3. secrets: listed, masked, and raised as an issue
         String secretValues = column(ext.tab.secrets, 2);
         check(column(ext.tab.secrets, 1).contains("HARDCODED_SECRET"), "secret listed");
-        check(!secretValues.contains("Zx9Qm2Lk8Pz4Rt6Vw1Yb5Nc7Hf0Jg3Ua"), "secret value is masked in the tab");
+        String found = "Zx9Qm2Lk8Pz4Rt6Vw1Yb5Nc7Hf0Jg3Ua";
+        check(secretValues.contains(found), "the tester sees the value that was found: " + secretValues);
+        check(DeepJsTab.mask(found).equals("Zx9Qm2Lk…g3Ua") && DeepJsTab.mask("hunter2").equals("hu…")
+                && DeepJsTab.mask("0123456789abcdef").equals("0123…ef"), "\"Mask values\" hides the middle of a value");
         check(fake.siteMapAdds.stream().anyMatch(o -> String.valueOf(o).contains("AuditIssue")), "an issue is raised for the secret");
 
         // 4. Repeater skeleton

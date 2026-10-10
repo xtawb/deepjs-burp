@@ -120,6 +120,7 @@ final class DeepJsTab extends JPanel {
 
     // Endpoint row layout — also what Actions.sendToRepeater receives.
     static final int E_METHOD = 0, E_URL = 1, E_QUERY = 2, E_BODY = 3, E_HEADERS = 4, E_KIND = 5, E_SOURCE = 6;
+    static final int S_VALUE = 2;
 
     final KeyedModel endpoints = new KeyedModel("Method", "URL", "Query", "Body", "Headers", "Found as", "Source");
     final KeyedModel secrets = new KeyedModel("Severity", "Type", "Value", "Key", "Source", "Note");
@@ -133,6 +134,7 @@ final class DeepJsTab extends JPanel {
     final JCheckBox raiseIssues = new JCheckBox("Report secrets as issues", true);
     final JCheckBox showStrings = new JCheckBox("Show string-only paths", true);
     final JCheckBox updateCheck = new JCheckBox("Check for updates when Burp starts", true);
+    final JCheckBox maskValues = new JCheckBox("Mask values", false);
 
     private final JLabel status = new JLabel("starting…");
     private final JTextArea other = new JTextArea();
@@ -152,7 +154,7 @@ final class DeepJsTab extends JPanel {
         add(tabs, BorderLayout.CENTER);
 
         tabs.addTab("API calls", endpointPanel());
-        tabs.addTab("Secrets", tablePanel(secrets, new int[]{70, 190, 200, 120, 260, 420}, true));
+        tabs.addTab("Secrets", secretsPanel());
         tabs.addTab("Hidden scripts", scriptsPanel());
         tabs.addTab("Hosts", tablePanel(hosts, new int[]{320, 110, 110, 110}, false));
         tabs.addTab("Routes · GraphQL · packages", textPanel(other));
@@ -233,6 +235,37 @@ final class DeepJsTab extends JPanel {
         top.add(new JLabel("Scripts and source maps the analysed code refers to — the parts of the app no page has loaded."));
         top.add(button("Fetch now", e -> actions.fetchHiddenNow()));
         JPanel p = tablePanel(scripts, new int[]{760, 110, 180}, false);
+        p.add(top, BorderLayout.NORTH);
+        return p;
+    }
+
+    /** How a secret is written when it must not be readable over a shoulder or in a screenshot. */
+    static String mask(String value) {
+        int n = value.codePointCount(0, value.length());
+        int head = n <= 8 ? 2 : n <= 20 ? 4 : 8, tail = n <= 8 ? 0 : n <= 20 ? 2 : 4;
+        return value.substring(0, value.offsetByCodePoints(0, Math.min(head, n))) + "…"
+                + value.substring(value.offsetByCodePoints(value.length(), -tail));
+    }
+
+    private JPanel secretsPanel() {
+        JPanel p = tablePanel(secrets, new int[]{70, 190, 320, 140, 300, 420}, true);
+        JTable table = (JTable) ((JScrollPane) p.getComponent(0)).getViewport().getView();
+        table.getColumnModel().getColumn(S_VALUE).setCellRenderer(new DefaultTableCellRenderer() {
+            @Override
+            protected void setValue(Object value) {
+                String text = String.valueOf(value);
+                setText(maskValues.isSelected() ? mask(text) : text);
+            }
+        });
+        maskValues.setToolTipText("Show only the first and last characters of each value (for screenshots and screen sharing). "
+                + "\"Copy cell\" still copies the whole value.");
+        maskValues.addActionListener(e -> {
+            actions.settingsChanged();
+            table.repaint();
+        });
+        JPanel top = new JPanel(new FlowLayout(FlowLayout.LEFT, 8, 2));
+        top.add(new JLabel("Values are shown as found. Nothing found is ever sent anywhere or tried."));
+        top.add(maskValues);
         p.add(top, BorderLayout.NORTH);
         return p;
     }
@@ -410,7 +443,7 @@ final class DeepJsTab extends JPanel {
     }
 
     void forEachOption(Consumer<JCheckBox> c) {
-        for (JCheckBox box : new JCheckBox[]{enabled, scopeOnly, fetchHidden, fetchMaps, raiseIssues, updateCheck}) {
+        for (JCheckBox box : new JCheckBox[]{enabled, scopeOnly, fetchHidden, fetchMaps, raiseIssues, updateCheck, maskValues}) {
             c.accept(box);
         }
     }

@@ -357,7 +357,7 @@ public final class DeepJsExtension implements BurpExtension, HttpHandler, Contex
                 return;                                     // an issue needs a URL to hang on
             }
             String detail = "<p>DeepJS found a credential in front-end code.</p><ul>"
-                    + "<li><b>Type:</b> " + html(f[2]) + "</li><li><b>Value:</b> " + html(f[3]) + "</li>"
+                    + "<li><b>Type:</b> " + html(f[2]) + "</li><li><b>Value:</b> " + html(tab.maskValues.isSelected() ? DeepJsTab.mask(f[3]) : f[3]) + "</li>"
                     + (f[4].isEmpty() ? "" : "<li><b>Assigned to:</b> " + html(f[4]) + "</li>")
                     + "<li><b>Location:</b> " + html(f[5]) + ":" + html(f[6]) + "</li></ul><p>" + html(f[7]) + "</p>";
             api.siteMap().add(AuditIssue.auditIssue(
