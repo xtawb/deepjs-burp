@@ -1,0 +1,67 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 5 * * 1"        # weekly: the Python engine moves on its own; parity must keep holding
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      # the wrapper jar is the one binary in the repository: check it is Gradle's own
+      - uses: gradle/actions/wrapper-validation@v4
+
+      - name: Build the jar and run the harness
+        run: ./gradlew --no-daemon jar harness
+
+      - name: The jar holds our classes and nothing else
+        shell: bash
+        run: |
+          unzip -Z1 build/libs/deepjs-burp.jar | grep '\.class$' | grep -v -E '^deepjs/(burp|engine)/' && exit 1
+          unzip -Z1 build/libs/deepjs-burp.jar | grep -q '^deepjs/burp/DeepJsExtension.class$'
+          unzip -Z1 build/libs/deepjs-burp.jar | grep -q '^deepjs/engine/Engine.class$'
+
+      # the engine must report exactly what the Python engine it was ported from reports
+      - uses: actions/checkout@v4
+        with:
+          repository: xtawb/deepjs
+          path: deepjs-python
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Parity with the Python engine
+        run: python tools/parity.py --classpath build/libs/deepjs-burp.jar --engine deepjs-python
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: deepjs-burp
+          path: build/libs/deepjs-burp.jar
+          if-no-files-found: error

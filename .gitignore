@@ -1,0 +1,9 @@
+build/
+build-local/
+.gradle/
+out/
+*.class
+.idea/
+*.iml
+.vscode/
+__pycache__/
